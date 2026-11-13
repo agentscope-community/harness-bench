@@ -1,16 +1,55 @@
 """Offline Harbor result aggregation; missing/error trials never become passes."""
 from collections import defaultdict
+from datetime import datetime
 import html
 import json
 import math
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 
 def _count(value, label):
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{label} must be a nonnegative integer")
     return value
+
+
+def _contexts(row):
+    if row.get("agent_result"):
+        return [row["agent_result"]]
+    return [s.get("agent_result") or {} for s in row.get("step_results") or []]
+
+
+def _link(path, output):
+    # Relative to the report so links keep working after copying artifacts/ or
+    # downloading the mirrored OSS prefix ({jobs,reports}/<name>/).
+    return quote(Path(os.path.relpath(path, output)).as_posix())
+
+
+def _trial_rows(rows, evidence):
+    """One line per recorded trial, for following up on individual tasks."""
+    result = []
+    for identifier, row in sorted(rows.items(), key=lambda item: (item[1]["trial_name"], item[0])):
+        exceptions = [row.get("exception_info")] + [s.get("exception_info") for s in row.get("step_results") or []]
+        error = next((e.get("exception_type") for e in exceptions if e), None)
+        duration = None
+        try:
+            if row.get("started_at") and row.get("finished_at"):
+                duration = round((datetime.fromisoformat(row["finished_at"])
+                                  - datetime.fromisoformat(row["started_at"])).total_seconds(), 1)
+        except (TypeError, ValueError):
+            pass
+        contexts = _contexts(row)
+        result.append({"trial": row["trial_name"], "agent": row["agent_info"]["name"],
+                       "model": (row["agent_info"].get("model_info") or {}).get("name", "unknown"),
+                       "dataset": row.get("source") or "adhoc",
+                       "reward": ((row.get("verifier_result") or {}).get("rewards") or {}).get("reward"),
+                       "error": error, "duration_sec": duration,
+                       "input_tokens": sum(c.get("n_input_tokens") or 0 for c in contexts),
+                       "output_tokens": sum(c.get("n_output_tokens") or 0 for c in contexts),
+                       "evidence": evidence[identifier]})
+    return result
 
 
 def aggregate(rows, planned=None, *, expected=None):
@@ -52,7 +91,7 @@ def aggregate(rows, planned=None, *, expected=None):
             group["scored"] += 1
             group["passed"] += reward == 1
             group["reward_sum"] += reward
-        contexts = [row["agent_result"]] if row.get("agent_result") else [s.get("agent_result") or {} for s in row.get("step_results") or []]
+        contexts = _contexts(row)
         for context in contexts:
             group["input_tokens"] += context.get("n_input_tokens") or 0
             group["output_tokens"] += context.get("n_output_tokens") or 0
@@ -163,6 +202,7 @@ def summarize_job(folder, output):
     from harbor.models.trial.result import TrialResult
     rows = {}
     links = []
+    evidence = {}
 
     def add_trial(raw, path):
         # TrialResult supplies a random UUID when omitted; that is not evidence.
@@ -174,7 +214,10 @@ def summarize_job(folder, output):
         if identifier in rows and rows[identifier] != row:
             raise ValueError(f"Conflicting evidence for trial {identifier}")
         rows[identifier] = row
-        links.append((row["trial_name"], path.as_uri()))
+        links.append((row["trial_name"], _link(path, output)))
+        # Prefer the trial's own directory over the job-level embedded copy.
+        if path != job_path or identifier not in evidence:
+            evidence[identifier] = links[-1][1]
 
     job_path = folder / "result.json"
     job = json.loads(job_path.read_text()) if job_path.is_file() else {}
@@ -192,16 +235,27 @@ def summarize_job(folder, output):
     if not rows and not job_path.is_file() and expected is None:
         raise ValueError("No Harbor job or trial results found in the selected directory")
     summary = aggregate(list(rows.values()), planned, expected=expected)
+    summary["trials"] = _trial_rows(rows, evidence)
     planned = summary["planned_trials"]
     output.mkdir(parents=True, exist_ok=False)
     (output / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    def cell(value):
+        return "<td>" + html.escape(str(value) if value is not None else "—") + "</td>"
+
     headers = ["Harness", "Model", "Dataset", "Planned", "Recorded", "Missing", "Errors", "Scored", "Passed", "Pass rate (recorded)", "Pass rate (planned)", "Mean reward (scored)"]
     table = "<tr>" + "".join("<th>" + html.escape(h) + "</th>" for h in headers) + "</tr>"
     for g in summary["groups"]:
         values = [g["agent"], g["model"], g["dataset"], g["planned"], g["recorded"], g["missing"], g["errors"], g["scored"], g["passed"], g["pass_rate_recorded"], g["pass_rate_planned"], g["mean_reward_scored"]]
-        table += "<tr>" + "".join("<td>" + html.escape(str(v) if v is not None else "—") + "</td>" for v in values) + "</tr>"
-    evidence = "".join(f'<li><a href="{html.escape(url, quote=True)}">{html.escape(name)}</a></li>' for name, url in links)
+        table += "<tr>" + "".join(cell(v) for v in values) + "</tr>"
+    trial_headers = ["Trial", "Harness", "Model", "Dataset", "Reward", "Error", "Duration (s)", "Input tokens", "Output tokens"]
+    trials = "<tr>" + "".join("<th>" + html.escape(h) + "</th>" for h in trial_headers) + "</tr>"
+    for t in summary["trials"]:
+        name = f'<td><a href="{html.escape(t["evidence"], quote=True)}">{html.escape(t["trial"])}</a></td>'
+        trials += "<tr>" + name + "".join(cell(t[k]) for k in ("agent", "model", "dataset", "reward", "error", "duration_sec", "input_tokens", "output_tokens")) + "</tr>"
+    evidence_list = "".join(f'<li><a href="{html.escape(url, quote=True)}">{html.escape(name)}</a></li>' for name, url in links)
     page = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Harness evaluation</title><style>body{font:15px system-ui;margin:24px;max-width:1200px;overflow-wrap:anywhere}.table-scroll{overflow-x:auto}table{border-collapse:collapse}th,td{padding:10px;border:1px solid #ddd;text-align:left;overflow-wrap:normal}th{background:#eef2f7}</style><h1>Harness evaluation</h1>'
-    page += f'<p>Recorded: {summary["recorded_trials"]}; planned: {planned}; missing: {summary["missing_trials"]}; pass rate (planned): {summary["pass_rate_planned"]}</p><p>{html.escape(summary["note"])}</p><div class="table-scroll"><table>{table}</table></div><h2>Source evidence</h2><ul>{evidence}</ul></html>'
+    page += f'<p>Recorded: {summary["recorded_trials"]}; planned: {planned}; missing: {summary["missing_trials"]}; pass rate (planned): {summary["pass_rate_planned"]}</p><p>{html.escape(summary["note"])}</p><div class="table-scroll"><table>{table}</table></div>'
+    page += f'<h2>Trials</h2><p>Each trial links to its result.json; agent/ and verifier/ in the same directory hold the trajectory and test output.</p><div class="table-scroll"><table>{trials}</table></div><h2>Source evidence</h2><ul>{evidence_list}</ul></html>'
     (output / "report.html").write_text(page, encoding="utf-8")
     return summary

@@ -81,6 +81,10 @@ vi .env
 | `HB_MODEL_A_ID` / `HB_MODEL_B_ID` | Two different model IDs, both served on Bailian `/responses` (needed by codex) |
 | `HB_TAU_API_KEY` / `HB_TAU_BASE_URL` | Default: reuse Bailian |
 | `HB_TAU_USER_MODEL` / `HB_TAU_ASSERTIONS_MODEL` | `openai/<model-id>`; may be the same; keep fixed across comparisons |
+
+tau3 tasks read `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `TAU2_USER_MODEL` and `TAU2_NL_ASSERTIONS_MODEL` from the
+controller environment when building the compose environment and running the verifier. `hbench run` derives and
+exports them from the `HB_TAU_*` values above, so do not set `OPENAI_*` separately.
 | `HB_PIP_INDEX_URL` | Optional; mainland: `https://mirrors.aliyun.com/pypi/simple/` |
 | `HB_RUNTIME_IMAGE` | `hbench/harness-runtime:0.1.0` |
 | `HB_CLUSTER` | `docker` |
@@ -93,6 +97,103 @@ Check the endpoint (no tokens used; 200 = OK, 401 = wrong key):
 ```sh
 set -a; . ./.env; set +a
 curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $HB_BAILIAN_API_KEY" "$HB_BAILIAN_BASE_URL/models"
+```
+
+### A4a. OSS archive (optional)
+
+Skip it and nothing is archived; evaluation is unaffected. Credentials come only from the ECS instance RAM role;
+no AccessKey goes into `.env`.
+
+**1. Bucket** (console, once): same region as the ECS host, ACL "Private". Recommended lifecycle rule: delete
+parts (incomplete multipart uploads) after 7 days.
+
+**2. RAM role** (once; if the role is already attached, only check its policy):
+
+1. RAM console → Identities → Roles → Create Role; trusted entity "Alibaba Cloud Service → Elastic Compute Service".
+2. Permissions → Policies → Create Policy → JSON, paste the policy below (replace `<bucket>`; also replace
+   `harness-bench` if you change `HB_OSS_PREFIX`), then grant it to the role:
+
+   ```json
+   {
+     "Version": "1",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": "oss:ListObjects",
+         "Resource": "acs:oss:*:*:<bucket>",
+         "Condition": {"StringLike": {"oss:Prefix": "harness-bench/*"}}
+       },
+       {
+         "Effect": "Allow",
+         "Action": ["oss:PutObject", "oss:GetObject", "oss:ListParts", "oss:AbortMultipartUpload"],
+         "Resource": "acs:oss:*:*:<bucket>/harness-bench/*"
+       }
+     ]
+   }
+   ```
+
+3. ECS console → Instances → More (or "All Actions") → Instance Settings → Attach/Detach RAM Role; pick the role.
+
+Confirm on the host (prints only the role name, never credentials):
+
+```sh
+t=$(curl -s -X PUT -H 'X-aliyun-ecs-metadata-token-ttl-seconds: 60' http://100.100.100.200/latest/api/token)
+curl -s -H "X-aliyun-ecs-metadata-token: $t" http://100.100.100.200/latest/meta-data/ram/security-credentials/
+```
+
+**3. Add to `.env`**:
+
+| Variable | Value |
+| --- | --- |
+| `HB_OSS_BUCKET` | Bucket name; empty = no archive |
+| `HB_OSS_REGION` | Bucket region, e.g. `cn-hangzhou` (same as the ECS host) |
+| `HB_OSS_ENDPOINT` | Empty = internal endpoint of the region; cross-region: `https://oss-<region>.aliyuncs.com` (Internet) |
+| `HB_OSS_PREFIX` | Default `harness-bench`; must match the prefix in the policy |
+| `HB_OSS_ROLE_NAME` | Empty = the role attached to the instance |
+| `HB_OSS_SYNC_INTERVAL` | Seconds between background uploads; default `300` |
+
+**4. Block containers from the metadata service** so task code cannot read the role (once per host):
+
+```sh
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/block-metadata.conf <<'EOT'
+[Service]
+ExecStartPost=-/bin/sh -c 'iptables -C DOCKER-USER -d 100.100.100.200/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 100.100.100.200/32 -j DROP'
+EOT
+sudo systemctl daemon-reload && sudo systemctl restart docker
+docker run --rm busybox nc -w 3 100.100.100.200 80 </dev/null && echo "NOT blocked" || echo blocked
+```
+
+`run-matrix.sh` checks the rule with `sudo -n iptables -C ...`; without passwordless sudo it prints an
+`[oss] WARNING`, which is safe to ignore once the command above prints `blocked`.
+
+**5. Check**:
+
+```sh
+set -a; . ./.env; set +a
+python -m hbench archive --check   # [oss] check OK: oss://<bucket>/harness-bench/ ...
+```
+
+| Output | Fix |
+| --- | --- |
+| `alibabacloud-oss-v2 is not installed` | `python -m pip install -r requirements-evals.txt` |
+| `HB_OSS_REGION is required` | Set `HB_OSS_REGION` in `.env` |
+| `No RAM role is attached to this ECS instance` | Do step 2.3 (attach the role) |
+| `ECS metadata returned no credentials for role ...` | `HB_OSS_ROLE_NAME` differs from the attached role; leave it empty |
+| `status=403 code=AccessDenied` | Bucket name or prefix in the policy, or the policy is not granted to the role |
+| `status=404 code=NoSuchBucket` | Wrong bucket name or `HB_OSS_REGION` |
+| Connection timeout / refused | The internal endpoint works only in the same region: check `HB_OSS_REGION` or set `HB_OSS_ENDPOINT` |
+
+**At run time**: `run-matrix.sh` runs `--check` first; on failure it prints `continuing WITHOUT OSS archive` and
+evaluates anyway. It then uploads finished trials in the background every `HB_OSS_SYNC_INTERVAL` seconds, and
+everything plus the report after the summary (at most 30 minutes; anything left stays local). OSS errors are
+printed as `[oss] ...` and never stop trials or change the exit code; local files are kept. `job.log` (Harbor
+debug log, not secret-scrubbed) is never uploaded. Objects: `<prefix>/jobs/<name>/...` and `<prefix>/reports/<name>/...`.
+
+Re-upload by hand (only new or changed files are sent); add `--dry-run` to list the objects without uploading:
+
+```sh
+python -m hbench archive artifacts/jobs/<name> --report artifacts/reports/<name>
 ```
 
 ### A5. Build images
@@ -161,9 +262,14 @@ On your laptop:
 
 ```sh
 rsync -az <user>@<ECS_IP>:~/harness-bench/artifacts/reports/ ./artifacts/reports/
+rsync -az <user>@<ECS_IP>:~/harness-bench/artifacts/jobs/<name> ./artifacts/jobs/   # optional: per-trial evidence behind report links
 ```
 
-Report: `artifacts/reports/<name>/summary.json` and `report.html`, one row per harness × model × dataset.
+Or from OSS: download `<prefix>/reports/<name>/` and `<prefix>/jobs/<name>/` side by side (console or `ossutil cp -r`).
+
+Report: `artifacts/reports/<name>/summary.json` and `report.html`: one row per harness × model × dataset, plus a
+Trials table with one row per trial, linked (relative path) to its `result.json`; `agent/` and `verifier/` next to it
+hold the trajectory and test output.
 
 ## B. ACK (later)
 

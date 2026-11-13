@@ -106,6 +106,34 @@ class CliTests(unittest.TestCase):
         self.assertIn('Unknown matrix settings', stderr.getvalue())
         self.assertFalse(output.exists())
 
+    def test_run_exports_job_environment_for_tau3_task_resolution(self):
+        plan = self.root / 'tau.yaml'
+        (self.root / 'ds').mkdir()
+        plan.write_text(yaml.safe_dump({
+            'job_name': 'tau', 'jobs_dir': str(self.root / 'jobs'), 'n_attempts': 1, 'n_concurrent_trials': 1,
+            'retry': {'max_retries': 0},
+            'environment': {'import_path': 'hbench.docker_environment:FrozenDockerEnvironment',
+                            'env': {'OPENAI_API_KEY': '${HB_TAU_API_KEY}', 'OPENAI_BASE_URL': '${HB_TAU_BASE_URL}',
+                                    'TAU2_USER_MODEL': '${HB_TAU_USER_MODEL:-}'},
+                            'kwargs': {'harness_runtime_image': 'hbench/harness-runtime:0.1.0'}},
+            'agents': [{'import_path': 'hbench.agents:FrozenPi', 'model_name': 'model', 'base_url': 'https://x.invalid',
+                        'model_api_key_name': 'HB_BAILIAN_API_KEY'}],
+            'datasets': [{'path': str(self.root / 'ds'), 'task_names': ['t']}],
+        }))
+        secrets = {'HB_TAU_API_KEY': 'tau-key', 'HB_TAU_BASE_URL': 'https://tau.invalid/v1',
+                   'HB_BAILIAN_API_KEY': 'model-key'}
+        self.run.return_value.returncode = 0
+        with patch.dict(os.environ, secrets, clear=True), patch('hbench.__main__.harbor_command', return_value='harbor'):
+            self.assertEqual(main(['run', '--config', str(plan)]), 0)
+        env = self.run.call_args.kwargs['env']
+        self.assertEqual(env['OPENAI_API_KEY'], 'tau-key')
+        self.assertEqual(env['OPENAI_BASE_URL'], 'https://tau.invalid/v1')
+        self.assertNotIn('TAU2_USER_MODEL', env)  # Empty values keep Harbor's explicit error.
+        with patch.dict(os.environ, {**secrets, 'OPENAI_API_KEY': 'explicit'}, clear=True), \
+                patch('hbench.__main__.harbor_command', return_value='harbor'):
+            main(['run', '--config', str(plan)])
+        self.assertEqual(self.run.call_args.kwargs['env']['OPENAI_API_KEY'], 'explicit')
+
     def test_existing_plan_outputs_refused_before_profile_rendering(self):
         for suffix in ('.yaml', '.plan.json'):
             with self.subTest(suffix=suffix):

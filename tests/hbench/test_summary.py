@@ -97,11 +97,26 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["pass_rate_planned"], 0.5)
         self.assertEqual(summary["groups"][0]["passed"], 1)
         page = (self.output / "report.html").read_text()
-        self.assertIn((self.job / "result.json").as_uri(), page)
+        self.assertIn('href="../job/result.json"', page)
+        self.assertNotIn("file://", page)
         self.assertIn("task__trial-1", page)
+        trial = summary["trials"][0]
+        self.assertEqual((trial["trial"], trial["agent"], trial["reward"], trial["error"]),
+                         ("task__trial-1", "pi", 1, None))
+        self.assertEqual((trial["input_tokens"], trial["output_tokens"], trial["evidence"]), (7, 3, "../job/result.json"))
         self.assertIn('name="viewport" content="width=device-width, initial-scale=1"', page)
         self.assertIn('.table-scroll{overflow-x:auto}', page)
         self.assertIn('<div class="table-scroll"><table>', page)
+
+    def test_trial_rows_report_error_and_duration(self):
+        raw = self.trial(reward=None)
+        raw.update(started_at="2026-11-12T00:00:00Z", finished_at="2026-11-12T00:01:30.5Z",
+                   exception_info={"exception_type": "AgentTimeoutError", "exception_message": "x",
+                                   "exception_traceback": "", "occurred_at": "2026-11-12T00:01:30Z"})
+        self.job_result([raw], 1)
+        trial = self.summarize()["trials"][0]
+        self.assertEqual((trial["error"], trial["duration_sec"], trial["reward"]), ("AgentTimeoutError", 90.5, None))
+        self.assertIn("<td>AgentTimeoutError</td>", (self.output / "report.html").read_text())
 
     def test_normalized_duplicate_keeps_both_evidence_links(self):
         raw = self.trial(171)
@@ -116,8 +131,9 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(group["input_tokens"], 7)
         self.assertEqual(group["output_tokens"], 3)
         page = (self.output / "report.html").read_text()
-        self.assertIn((self.job / "result.json").as_uri(), page)
-        self.assertIn(path.as_uri(), page)
+        self.assertIn('href="../job/result.json"', page)
+        self.assertIn('href="../job/trial/result.json"', page)
+        self.assertEqual([t["evidence"] for t in summary["trials"]], ["../job/trial/result.json"])
 
     def test_conflicting_duplicate_fails_before_output(self):
         self.job_result([self.trial()], 1)
@@ -396,7 +412,7 @@ class SummaryTests(unittest.TestCase):
         for value in values + [raw["trial_name"]]:
             self.assertIn(html.escape(value), page)
             self.assertNotIn(value, page)
-        self.assertIn(f'href="{html.escape(path.as_uri(), quote=True)}"', page)
+        self.assertIn('href="../job/trial%20%22%20%26%20%3C/result.json"', page)
         self.assertNotIn("<script>", page)
 
 

@@ -146,6 +146,15 @@ def main(argv=None):
     summary = commands.add_parser("summary", help="Create offline JSON and HTML from a Harbor job directory")
     summary.add_argument("job", type=Path)
     summary.add_argument("--output", type=Path, required=True)
+    archive = commands.add_parser("archive", help="Best-effort upload of a job (and report) to OSS via the ECS RAM role; errors are printed, never fatal")
+    archive.add_argument("job", type=Path, nargs="?", help="Job directory, e.g. artifacts/jobs/<name>")
+    archive.add_argument("--report", type=Path, help="Report directory, e.g. artifacts/reports/<name>")
+    archive.add_argument("--check", action="store_true", help="Verify HB_OSS_* settings, the ECS role and bucket listing; uploads nothing")
+    archive.add_argument("--dry-run", action="store_true", help="List the object keys that would be uploaded; no network")
+    archive.add_argument("--follow", action="store_true", help="Upload finished trials every --interval seconds; SIGUSR1 then uploads everything, SIGTERM/SIGINT or --parent exit stop after settled trials")
+    archive.add_argument("--interval", type=int, default=300, help="Seconds between background syncs (min 10)")
+    archive.add_argument("--parent", type=int, help="Stop following when this process exits")
+    archive.add_argument("--final-timeout", type=int, default=1800, help="Seconds allowed for the last --follow pass; the rest stays local")
     images = commands.add_parser("images", help="Inventory, build, or mirror evaluation images")
     image_commands = images.add_subparsers(dest="action", required=True)
     image_list = image_commands.add_parser("list")
@@ -226,12 +235,23 @@ def main(argv=None):
                     raise ValueError("Job directory already exists; render a new plan before execution")
                 validate_execution(job)
             environment = dict(os.environ)
+            # tau3 task.toml resolves OPENAI_*/TAU2_* from the controller environment
+            # (compose substitution and verifier env), not from the job env only.
+            from harbor.utils.env import resolve_env_vars
+            job_env = job.get("environment", {}).get("env")
+            if isinstance(job_env, dict):
+                for key, value in resolve_env_vars(job_env).items():
+                    if value:
+                        environment.setdefault(key, value)
             environment["PYTHONPATH"] = str(ROOT) + os.pathsep + environment.get("PYTHONPATH", "")
             return subprocess.run(command, cwd=ROOT, env=environment).returncode
         elif args.command == "summary":
             from .summary import summarize_job
             value = summarize_job(args.job, args.output)
             print(json.dumps({"recorded_trials": value["recorded_trials"], "report": str((args.output / "report.html").resolve())}))
+        elif args.command == "archive":
+            from .archive import command
+            return command(args)
         elif args.command == "images":
             from . import images as tools
             if args.action == "list":

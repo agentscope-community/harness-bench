@@ -8,3 +8,5 @@ toml==0.10.2
 python-dateutil>=2.9.0.post0,<3.0.0
 # Offline reporting uses the metadata-only provider resolver verified in this version.
 litellm==1.109.1
+# Optional OSS archive (python -m hbench archive); credentials come from the ECS RAM role.
+alibabacloud-oss-v2==1.4.1
