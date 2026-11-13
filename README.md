@@ -338,6 +338,10 @@ python -m unittest discover -s tests/hbench -p 'test_*.py'   # optional offline 
 After this, `artifacts/datasets/{terminal-bench,swe-bench-verified,tau3-bench}` should each contain a
 `manifest.json`, with 66, 500 and 375 tasks respectively.
 
+On the `datasets/bundled-prepared` branch these three prepared datasets (~0.6 GB) are committed, so a
+checkout of that branch can skip `datasets pull`/`prepare`. Their `manifest.json` files record the
+preparing machine's absolute paths as provenance metadata only; runs do not use them.
+
 #### A4. Fill in the environment file
 
 ```sh

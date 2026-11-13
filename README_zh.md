@@ -308,6 +308,9 @@ python -m unittest discover -s tests/hbench -p 'test_*.py'   # 可选的离线�
 完成后，`artifacts/datasets/{terminal-bench,swe-bench-verified,tau3-bench}` 下应各有一个
 `manifest.json`，题数分别为 66、500、375。
 
+`datasets/bundled-prepared` 分支已提交这三套准备好的题库（约 0.6 GB），检出该分支即可跳过
+`datasets pull`/`prepare`。其中 `manifest.json` 记录的是准备机器上的绝对路径，仅作来源信息，运行时不使用。
+
 #### A4. 填写环境变量文件
 
 ```sh

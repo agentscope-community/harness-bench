@@ -1,5 +1,7 @@
 /.venv/
-/artifacts/
+# Run outputs stay local; only the prepared datasets are versioned on this branch.
+/artifacts/*
+!/artifacts/datasets/
 /.pytest_cache/
 /.ruff_cache/
 /report.html
@@ -66,3 +68,6 @@ nohup.out
 /configs/acs-*-preflight-mutation.json
 /configs/acs-*-preflight-skills.json
 /configs/business-cluster-expansion.json
+
+# Keep every prepared dataset file (task binaries, wheels, logs, fixtures) verbatim.
+!/artifacts/datasets/**
