@@ -42,9 +42,35 @@ echo "==> Render plan: $plan"
 "$python" -m hbench "${args[@]}"
 echo "==> Dry-run (no model calls)"
 "$python" -m hbench run --config "$plan" --dry-run
+
+# Optional OSS archive. It runs beside the evaluation: any OSS problem is only
+# printed with an [oss] prefix and never stops trials or changes the exit code.
+job="artifacts/jobs/$name"
+report="artifacts/reports/$name"
+oss=0
+if [ -n "${HB_OSS_BUCKET:-}" ]; then
+  echo "==> OSS check"
+  if "$python" -m hbench archive --check; then
+    oss=1
+  else
+    echo "[oss] check failed; continuing WITHOUT OSS archive (results stay local)" >&2
+  fi
+  if [ "$cluster" = docker ] && ! sudo -n iptables -C DOCKER-USER -d 100.100.100.200/32 -j DROP 2>/dev/null; then
+    echo "[oss] WARNING: cannot confirm containers are blocked from the ECS metadata service" \
+         "(100.100.100.200); task code could read the instance role. See docs/operation-guide.md." >&2
+  fi
+fi
+
 if [ "${HB_DRY_RUN_ONLY:-0}" = 1 ]; then
   echo "HB_DRY_RUN_ONLY=1: stopping before the real run. Plan: $plan"
   exit 0
+fi
+
+oss_pid=
+if [ "$oss" = 1 ]; then
+  nice -n 10 "$python" -m hbench archive "$job" --report "$report" --follow --parent $$ \
+    --interval "${HB_OSS_SYNC_INTERVAL:-300}" &
+  oss_pid=$!
 fi
 
 echo "==> Real run (calls models; may incur cost)"
@@ -52,8 +78,16 @@ status=0
 "$python" -m hbench run --config "$plan" || status=$?
 
 echo "==> Summary"
-"$python" -m hbench summary "artifacts/jobs/$name" --output "artifacts/reports/$name" || true
+"$python" -m hbench summary "$job" --output "$report" || true
+if [ -n "$oss_pid" ]; then
+  echo "==> Final OSS upload (evaluation already finished)"
+  # SIGUSR1 = run and summary are done, so a full final pass is safe (TERM would upload settled trials only).
+  kill -USR1 "$oss_pid" 2>/dev/null || true
+  wait "$oss_pid" || echo "[oss] some uploads failed (see [oss] lines above); local results are intact." \
+    "Retry: $python -m hbench archive $job --report $report" >&2
+fi
 echo "Plan:   $plan"
-echo "Job:    artifacts/jobs/$name"
-echo "Report: artifacts/reports/$name/report.html"
+echo "Job:    $job"
+echo "Report: $report/report.html"
+[ "$oss" = 0 ] || echo "OSS:    oss://$HB_OSS_BUCKET/${HB_OSS_PREFIX:-harness-bench}/{jobs,reports}/$name/"
 exit "$status"

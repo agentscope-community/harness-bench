@@ -20,6 +20,14 @@
 [bailian-18.yaml](configs/matrices/bailian-18.yaml) 把 3 个题库、2 个模型和 3 个 Harness 配成了 18 种组合。
 每道题用两种模型、三个 Harness 各跑一遍，也就是每题 6 次。全部 941 道题共计 5,646 次评测（trial），由同一个 Harbor job 调度。
 
+| Harness | 固定 CLI 版本 | 支持的 `api_formats` |
+| --- | --- | --- |
+| Codex | `0.167.2` | 仅 `openai_responses` |
+| Pi | `1.5.2` | `openai_chat_completions`、`openai_responses`、`anthropic_messages` |
+| AgentScope Java | `1.2.0` | 仅 `openai_chat_completions` |
+
+Pi 要求 Node >=22.19.0，使用外部 `pi-mcp-adapter` `7.0.1`（Pi 兼容范围 `>=1.0.0,<2.0.0`）。
+
 ## 运行架构
 
 ```mermaid
@@ -42,6 +50,8 @@ flowchart LR
   MAIN -- "Responses / Chat Completions" --> LLM["百炼模型 A / B"]
   SC -- "tau3 用户模拟 / NL 断言" --> AUX["辅助 LLM"]
   VER --> OUT["artifacts/jobs"] --> REP["artifacts/reports<br/>summary.json · report.html"]
+  OUT -. "hbench archive (optional)" .-> OSS["OSS bucket"]
+  REP -.-> OSS
 ```
 
 题库提供题目镜像。用 `python -m hbench images build` 在本地构建 Harness 运行时镜像和两个 tau3 镜像。在 ACK 或 ACS 上运行时，还需要把这些镜像推到镜像仓库。
@@ -52,7 +62,7 @@ flowchart LR
 
 | 路径 | 内容 |
 | --- | --- |
-| `hbench/` | CLI：datasets、plan/matrix、run、summary、images |
+| `hbench/` | CLI：datasets、plan/matrix、run、summary、archive（OSS）、images |
 | `configs/` | 题库、模型、Harness、集群、矩阵配置 |
 | `deploy/` | 运行评测矩阵的脚本 `run-matrix.sh` 和 Kubernetes 清单 |
 | `environments/hbench/` | 运行时镜像与 tau3 镜像的 Dockerfile |

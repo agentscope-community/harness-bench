@@ -219,14 +219,20 @@ class AgentScopeJava(BaseInstalledAgent):
             configs.append(config)
         return configs
 
-    async def _write_agent_config_text(self, environment, *, content: str, remote_path: str):
+    async def _write_agent_config_text(
+        self, environment, *, content: str, remote_path: str, overwrite: bool = False
+    ):
         # Uploads are root-owned even when the image's implicit USER is non-root.
         # SECRET makes Harbor redact this per-exec value before DEBUG logging.
+        # Noclobber by default so a planted file or symlink is never followed.
+        # The request path is the exception: record_request() already wrote the same
+        # file host-side and it is mounted at /logs/agent, so it must be overwritten.
+        guard = "" if overwrite else "set -C; "
         await self.exec_as_agent(
             environment,
             command=(
-                "umask 077; set -C; "
-                f"printf '%s' \"$HB_PRIVATE_CONFIG_SECRET\" > {shlex.quote(remote_path)}"
+                "umask 077; " + guard
+                + f"printf '%s' \"$HB_PRIVATE_CONFIG_SECRET\" > {shlex.quote(remote_path)}"
             ),
             env={"HB_PRIVATE_CONFIG_SECRET": content},
         )
@@ -254,7 +260,8 @@ class AgentScopeJava(BaseInstalledAgent):
             environment, command=f"mkdir -p {shlex.quote(str(self.environment_logs_dir))}"
         )
         await self._write_agent_config_text(
-            environment, content=request.read_text(encoding="utf-8"), remote_path=remote_request
+            environment, content=request.read_text(encoding="utf-8"), remote_path=remote_request,
+            overwrite=True,
         )
         workdir_result = await self.exec_as_agent(environment, command="pwd")
         workdir = (workdir_result.stdout or "").strip()

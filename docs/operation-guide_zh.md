@@ -80,6 +80,9 @@ vi .env
 | `HB_MODEL_A_ID` / `HB_MODEL_B_ID` | 两个不同的模型 ID，都必须支持百炼 `/responses`（codex 需要） |
 | `HB_TAU_API_KEY` / `HB_TAU_BASE_URL` | 默认复用百炼 |
 | `HB_TAU_USER_MODEL` / `HB_TAU_ASSERTIONS_MODEL` | `openai/<model-id>`，可相同；对比期间不要改 |
+
+tau3 的 task.toml 在生成 compose 环境和执行判分时会从控制机环境读取 `OPENAI_API_KEY`、`OPENAI_BASE_URL`、
+`TAU2_USER_MODEL`、`TAU2_NL_ASSERTIONS_MODEL`。`hbench run` 会用上面的 `HB_TAU_*` 自动派生并导出，不用另外配 `OPENAI_*`。
 | `HB_PIP_INDEX_URL` | 可选，内地填 `https://mirrors.aliyun.com/pypi/simple/` |
 | `HB_RUNTIME_IMAGE` | `hbench/harness-runtime:0.1.0` |
 | `HB_CLUSTER` | `docker` |
@@ -92,6 +95,98 @@ vi .env
 ```sh
 set -a; . ./.env; set +a
 curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $HB_BAILIAN_API_KEY" "$HB_BAILIAN_BASE_URL/models"
+```
+
+### A4a. OSS 归档（可选）
+
+不配置就不归档，评测照常。凭证只来自 ECS 实例 RAM 角色，`.env` 里不放 AccessKey。
+
+**1. Bucket**（控制台，一次）：与 ECS 同地域，读写权限选「私有」。建议加生命周期规则：7 天后删除碎片（未完成的分片上传）。
+
+**2. RAM 角色**（一次；角色已绑定时只核对权限策略）：
+
+1. RAM 控制台 → 身份管理 → 角色 → 创建角色，信任主体选「云服务 → 云服务器 ECS」。
+2. 权限管理 → 权限策略 → 创建权限策略 → 脚本编辑，粘贴下面内容（替换 `<bucket>`；改了 `HB_OSS_PREFIX` 时同时替换 `harness-bench`），再把该策略授权给角色：
+
+   ```json
+   {
+     "Version": "1",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": "oss:ListObjects",
+         "Resource": "acs:oss:*:*:<bucket>",
+         "Condition": {"StringLike": {"oss:Prefix": "harness-bench/*"}}
+       },
+       {
+         "Effect": "Allow",
+         "Action": ["oss:PutObject", "oss:GetObject", "oss:ListParts", "oss:AbortMultipartUpload"],
+         "Resource": "acs:oss:*:*:<bucket>/harness-bench/*"
+       }
+     ]
+   }
+   ```
+
+3. ECS 控制台 → 实例 → 更多（或「全部操作」）→ 实例设置 → 授予/收回 RAM 角色，选该角色。
+
+在主机上确认（只输出角色名，不输出凭证）：
+
+```sh
+t=$(curl -s -X PUT -H 'X-aliyun-ecs-metadata-token-ttl-seconds: 60' http://100.100.100.200/latest/api/token)
+curl -s -H "X-aliyun-ecs-metadata-token: $t" http://100.100.100.200/latest/meta-data/ram/security-credentials/
+```
+
+**3. 填写 `.env`**：
+
+| 变量 | 值 |
+| --- | --- |
+| `HB_OSS_BUCKET` | Bucket 名；留空 = 不归档 |
+| `HB_OSS_REGION` | Bucket 地域，如 `cn-hangzhou`（与 ECS 同地域） |
+| `HB_OSS_ENDPOINT` | 留空 = 该地域内网 Endpoint；跨地域时填 `https://oss-<region>.aliyuncs.com`（走公网） |
+| `HB_OSS_PREFIX` | 默认 `harness-bench`，须与策略中的前缀一致 |
+| `HB_OSS_ROLE_NAME` | 留空 = 实例绑定的角色 |
+| `HB_OSS_SYNC_INTERVAL` | 后台上传间隔（秒），默认 `300` |
+
+**4. 禁止容器访问元数据服务**，防止题目代码读取角色凭证（每台主机一次）：
+
+```sh
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/block-metadata.conf <<'EOT'
+[Service]
+ExecStartPost=-/bin/sh -c 'iptables -C DOCKER-USER -d 100.100.100.200/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 100.100.100.200/32 -j DROP'
+EOT
+sudo systemctl daemon-reload && sudo systemctl restart docker
+docker run --rm busybox nc -w 3 100.100.100.200 80 </dev/null && echo "未拦截" || echo 已拦截
+```
+
+`run-matrix.sh` 每次用 `sudo -n iptables -C ...` 核对这条规则；运行用户没有免密 sudo 时会打印 `[oss] WARNING`，只要上面输出「已拦截」即可忽略。
+
+**5. 检查**：
+
+```sh
+set -a; . ./.env; set +a
+python -m hbench archive --check   # [oss] check OK: oss://<bucket>/harness-bench/ ...
+```
+
+| 输出 | 处理 |
+| --- | --- |
+| `alibabacloud-oss-v2 is not installed` | `python -m pip install -r requirements-evals.txt` |
+| `HB_OSS_REGION is required` | 在 `.env` 填 `HB_OSS_REGION` |
+| `No RAM role is attached to this ECS instance` | 做第 2 步第 3 项（绑定角色） |
+| `ECS metadata returned no credentials for role ...` | `HB_OSS_ROLE_NAME` 与绑定的角色不一致，留空即可 |
+| `status=403 code=AccessDenied` | 策略里的 Bucket 名、前缀，或策略未授权给该角色 |
+| `status=404 code=NoSuchBucket` | Bucket 名或 `HB_OSS_REGION` 填错 |
+| 连接超时 / 无法连接 | 内网 Endpoint 只在同地域可达：核对 `HB_OSS_REGION`，或设置 `HB_OSS_ENDPOINT` |
+
+**运行时**：`run-matrix.sh` 开跑前自动 `--check`，失败只提示 `continuing WITHOUT OSS archive`，评测照常。之后每隔
+`HB_OSS_SYNC_INTERVAL` 秒在后台上传已结束的 trial，summary 后再上传全部文件和报告（最多 30 分钟，没传完的留在本地）。
+OSS 出错只打印 `[oss] ...`，不中断评测、不改变退出码，本地文件保留。`job.log`（Harbor 调试日志，未脱敏）不上传。
+对象路径：`<prefix>/jobs/<name>/...`、`<prefix>/reports/<name>/...`。
+
+手动补传（只传新增或变化的文件）；加 `--dry-run` 只列出将要上传的对象：
+
+```sh
+python -m hbench archive artifacts/jobs/<name> --report artifacts/reports/<name>
 ```
 
 ### A5. 构建镜像
@@ -158,9 +253,13 @@ PYTHONPATH="$PWD" .venv/bin/harbor jobs resume -p artifacts/jobs/<name>
 
 ```sh
 rsync -az <user>@<ECS_IP>:~/harness-bench/artifacts/reports/ ./artifacts/reports/
+rsync -az <user>@<ECS_IP>:~/harness-bench/artifacts/jobs/<name> ./artifacts/jobs/   # 可选：报告中逐题链接指向的证据
 ```
 
-报告：`artifacts/reports/<name>/summary.json` 和 `report.html`，每个 harness × 模型 × 题库一行。
+或从 OSS：把 `<prefix>/reports/<name>/` 和 `<prefix>/jobs/<name>/` 一起下载（控制台或 `ossutil cp -r`）。
+
+报告：`artifacts/reports/<name>/summary.json` 和 `report.html`：每个 harness × 模型 × 题库一行；另有 Trials 表，
+每个 trial 一行，相对路径链接到它的 `result.json`，同目录的 `agent/`、`verifier/` 是轨迹和测试输出。
 
 ## B. ACK（以后）
 

@@ -485,7 +485,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             if "printf '%s'" in call.kwargs["command"]
         )
         self.assertEqual(request_write["command"], (
-            "set -o pipefail; umask 077; set -C; "
+            "set -o pipefail; umask 077; "
             "printf '%s' \"$HB_PRIVATE_CONFIG_SECRET\" > /logs/agent/request.json"
         ))
         self.assertIsNone(request_write["user"])

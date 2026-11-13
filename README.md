@@ -20,6 +20,14 @@ For setup instructions and commands for your first run, see the [operation guide
 The [Bailian matrix](configs/matrices/bailian-18.yaml) covers 18 combinations of dataset, model, and harness.
 Each of the 941 tasks runs once with each model and harness pairing, for a total of 5,646 trials in one Harbor job.
 
+| Harness | Frozen CLI version | Supported `api_formats` |
+| --- | --- | --- |
+| Codex | `0.167.2` | `openai_responses` only |
+| Pi | `1.5.2` | `openai_chat_completions`, `openai_responses`, `anthropic_messages` |
+| AgentScope Java | `1.2.0` | `openai_chat_completions` only |
+
+Pi requires Node >=22.19.0 and uses the external `pi-mcp-adapter` `7.0.1` (Pi compatibility range `>=1.0.0,<2.0.0`).
+
 ## Architecture
 
 ```mermaid
@@ -42,6 +50,8 @@ flowchart LR
   MAIN -- "Responses / Chat Completions" --> LLM["Bailian models A / B"]
   SC -- "tau3 user / NL assertions" --> AUX["Auxiliary LLM"]
   VER --> OUT["artifacts/jobs"] --> REP["artifacts/reports<br/>summary.json · report.html"]
+  OUT -. "hbench archive (optional)" .-> OSS["OSS bucket"]
+  REP -.-> OSS
 ```
 
 The datasets supply the task images. Run `python -m hbench images build` to build the harness runtime image and the two tau3 images locally. For ACK or ACS, also push those images to a registry.
@@ -52,7 +62,7 @@ Keep credentials in the controller host’s `.env` file and out of configuration
 
 | Path | Contents |
 | --- | --- |
-| `hbench/` | CLI: datasets, plan/matrix, run, summary, images |
+| `hbench/` | CLI: datasets, plan/matrix, run, summary, archive (OSS), images |
 | `configs/` | Benchmark, model, harness, cluster and matrix profiles |
 | `deploy/` | `run-matrix.sh` for running a benchmark matrix, plus Kubernetes manifests |
 | `environments/hbench/` | Dockerfiles for the harness runtime and tau3 images |
