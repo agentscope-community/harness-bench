@@ -27,7 +27,7 @@ PI_MCP_ADAPTER_VERSION = "7.0.1"
 PI_MCP_VERSIONS = SpecifierSet(">=1.0.0,<2.0.0")
 PI_MCP_EXTENSION = "/tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts"
 PI_MCP_CONFIG = "/tmp/harbor-pi-agent/mcp.json"
-AGENTSCOPE_CLI_VERSION = "1.2.0"
+AGENTSCOPE_CLI_VERSION = "1.3.0"
 JAVA_CLI = (
     "java -cp '/opt/harness/classes:/opt/harness/dependency/*' "
     "io.agentscope.examples.eval.HarnessEvalCli"
@@ -111,6 +111,18 @@ class FrozenPi(Pi):
     def version(self):
         return _frozen_version(super().version(), PI_VERSION)
 
+    def _build_custom_models_json(self, access, model_id):
+        models_json = super()._build_custom_models_json(access, model_id)
+        if models_json is not None:
+            for provider in models_json["providers"].values():
+                for model in provider["models"]:
+                    # Pi sends the OpenAI ``developer`` role whenever a custom
+                    # endpoint's model is marked reasoning-capable. Bailian only
+                    # accepts system/assistant/user/tool/function and rejects
+                    # those requests with HTTP 400.
+                    model["compat"] = {"supportsDeveloperRole": False}
+        return models_json
+
     def get_version_command(self):
         return "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi; pi --version"
 
@@ -167,6 +179,10 @@ class AgentScopeJavaOptions(InstalledAgentOptions):
     max_turns: int = Field(default=60, ge=1)
     temperature: float | None = Field(default=0.0, ge=0, le=2, allow_inf_nan=False)
     max_tokens: int = Field(default=8192, ge=1)
+    context_window_tokens: int = Field(
+        default=0, ge=0,
+        description="Reported model context window in tokens; 0 infers it from the model name.",
+    )
     extra_body: dict = Field(default_factory=lambda: {"enable_thinking": False})
     turn_timeout_seconds: int = Field(default=600, ge=1)
     system_prompt: str = ""
@@ -285,6 +301,8 @@ class AgentScopeJava(BaseInstalledAgent):
             ),
             "TURN_TIMEOUT_SECONDS": str(self.options.turn_timeout_seconds),
         }
+        if self.options.context_window_tokens:
+            env["EVAL_MODEL_CONTEXT_WINDOW"] = str(self.options.context_window_tokens)
         command = JAVA_CLI + " " + shlex.join([remote_request, native, workdir])
         private_mcp_dir = None
         context.metadata = {

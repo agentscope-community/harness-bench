@@ -124,6 +124,44 @@ def _compose_path(task: Path) -> Path:
     raise ValueError(f"No compose file in {task}")
 
 
+def _adapt_tau3_verifier(task: Path) -> bool:
+    """Make the Hub verifier work with the pinned tau2-bench 2.0 evaluator.
+
+    tau2-bench 2.0 (commit 989d3285) made ``communicate_scoring`` a required
+    keyword-only argument of ``evaluate_simulation``; the Hub verifier predates
+    that change and would fail every tau3 trial with
+    ``tau2_runtime_log_error``. SUBSTRING keeps the original verifier's
+    matching semantics -- the semantic default would add its own judge model.
+    """
+    path = task / "tests" / "evaluate.py"
+    if not path.is_file():
+        return False
+    text = path.read_text()
+    if "communicate_scoring=" in text:
+        return False
+    import_anchor = '    get_now = _import_attr("tau2.utils.utils", "get_now")\n'
+    call_anchor = "        solo_mode=False,\n"
+    if text.count(import_anchor) != 1 or text.count(call_anchor) != 1:
+        raise ValueError(f"Unexpected tau3 verifier layout: {path}")
+    text = text.replace(
+        import_anchor,
+        import_anchor
+        + '    CommunicateScoring = _import_attr(\n'
+        '        "tau2.data_model.semantic_communication", "CommunicateScoring"\n'
+        "    )\n"
+        '    CommunicateScorer = _import_attr(\n'
+        '        "tau2.data_model.semantic_communication", "CommunicateScorer"\n'
+        "    )\n",
+    )
+    text = text.replace(
+        call_anchor,
+        call_anchor
+        + "        communicate_scoring=CommunicateScoring(scorer=CommunicateScorer.SUBSTRING),\n",
+    )
+    path.write_text(text)
+    return True
+
+
 def _adapt_task(name: str, task: Path) -> list[dict[str, Any]]:
     adaptations: list[dict[str, Any]] = []
     if name == "swe-bench-verified":
@@ -147,6 +185,8 @@ def _adapt_task(name: str, task: Path) -> list[dict[str, Any]]:
             {"kind": "shared_main", "docker_image": TAU3_MAIN_IMAGE, "workdir": workdir, "build": False},
             {"kind": "shared_tau3_runtime", "docker_image": TAU3_RUNTIME_IMAGE, "task_config": f"tasks/{task.name}.json", "build": False},
         ])
+        if _adapt_tau3_verifier(task):
+            adaptations.append({"kind": "tau2_communicate_scoring_substring"})
     else:
         config = tomllib.loads((task / "task.toml").read_text())
         if not config.get("environment", {}).get("docker_image"):

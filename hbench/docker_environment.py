@@ -372,7 +372,9 @@ test -r "$agent_home/.nvm/nvm.sh"
 mkdir -p /logs/agent /logs/verifier /logs/artifacts /logs/user-agent
 chmod 777 /logs/agent /logs/verifier /logs/artifacts /logs/user-agent
 """
-        result = await self.exec(script, cwd="/", env={"HOME": "/root"}, user="root", timeout_sec=60)
+        # The script itself is trivial; a loaded daemon can still queue an exec well
+        # past 60s, so keep this generous instead of failing the trial at startup.
+        result = await self.exec(script, cwd="/", env={"HOME": "/root"}, user="root", timeout_sec=300)
         if result.return_code:
             raise RuntimeError(f"Frozen Docker runtime setup failed ({result.return_code}): {result.stderr or result.stdout}")
         check = 'test -w "$HOME" && test -r "$HOME/.nvm/nvm.sh"'

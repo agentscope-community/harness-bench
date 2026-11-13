@@ -75,7 +75,7 @@ class TransferMixin:
 
     async def _upload_archive(self, data: bytes, target: str):
         if self.transfer == "stream":
-            result = await self.exec("mkdir -p " + shlex.quote(target), cwd="/", user="root", timeout_sec=60)
+            result = await self.exec("mkdir -p " + shlex.quote(target), cwd="/", user="root", timeout_sec=300)
             if result.return_code:
                 raise RuntimeError("Unable to create transfer destination: " + str(result.stderr))
             await self._stream_transfer(["tar", "xf", "-", "-C", target], data)
