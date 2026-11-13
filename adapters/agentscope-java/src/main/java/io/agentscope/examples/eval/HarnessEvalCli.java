@@ -27,6 +27,8 @@ import io.agentscope.core.model.ChatUsage;
 import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ToolSchema;
+import io.agentscope.core.permission.PermissionContextState;
+import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.state.JsonFileAgentStateStore;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientBuilder;
@@ -47,6 +49,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -62,7 +65,7 @@ public final class HarnessEvalCli {
 
     public static void main(String[] args) throws IOException {
         if (args.length == 1 && args[0].equals("--version")) {
-            System.out.println("agentscope-harness-eval 1.2.0");
+            System.out.println("agentscope-harness-eval 1.3.0");
             return;
         }
         if (args.length != 3) {
@@ -120,16 +123,23 @@ public final class HarnessEvalCli {
         String temperature = System.getenv().getOrDefault("EVAL_MODEL_TEMPERATURE", "0.0");
         if (!temperature.isBlank()) options.temperature(Double.parseDouble(temperature));
         if (!extraBody.isEmpty()) options.additionalBodyParams(extraBody);
-        var model =
+        var modelBuilder =
                 OpenAIChatModel.builder()
                         .apiKey(apiKey)
                         .baseUrl(System.getenv("MODEL_BASE_URL"))
                         .modelName(System.getenv("MODEL_ID"))
                         .stream(true)
-                        .generateOptions(options.build())
-                        .build();
+                        .generateOptions(options.build());
+        // Unknown Bailian model names infer no window; the harness then falls back to
+        // 64000 input tokens while compaction triggers on a different fallback. Reporting
+        // the real window keeps both thresholds consistent and avoids false budget stops.
+        int contextWindowTokens =
+                Integer.parseInt(System.getenv().getOrDefault("EVAL_MODEL_CONTEXT_WINDOW", "0"));
+        if (contextWindowTokens > 0) modelBuilder.contextWindowSize(contextWindowTokens);
+        var model = modelBuilder.build();
         Toolkit toolkit = mcpToolkit(System.getenv("EVAL_MCP_SERVERS"));
         AtomicBoolean exceeded = new AtomicBoolean();
+        boolean iterationLimited = false;
         boolean failed = false;
         try (BufferedWriter output =
                 Files.newBufferedWriter(
@@ -166,7 +176,14 @@ public final class HarnessEvalCli {
                                             .projectWritable(true))
                             .maxIters(
                                     Integer.parseInt(
-                                            System.getenv().getOrDefault("MAX_TURNS", "60")));
+                                            System.getenv().getOrDefault("MAX_TURNS", "60")))
+                            // Unattended evaluation has no user to confirm HITL prompts.
+                            // Without this, any ASK-gated tool (e.g. tau3's
+                            // start_conversation) stops the run instead of executing it.
+                            .permissionContext(
+                                    PermissionContextState.builder()
+                                            .mode(PermissionMode.BYPASS)
+                                            .build());
             String systemPrompt = System.getenv("EVAL_SYSTEM_PROMPT");
             if (systemPrompt != null && !systemPrompt.isBlank()) {
                 builder.sysPrompt(systemPrompt);
@@ -265,12 +282,19 @@ public final class HarnessEvalCli {
                                     Instant.now().toString(),
                                     "tools",
                                     agent.getToolkit().getToolNames()));
-                    if (exceeded.get())
-                        throw new IllegalStateException("Harness iteration limit reached");
+                    if (exceeded.get()) {
+                        // A step cap is a normal stop, not an infrastructure failure: other
+                        // harnesses stop at their turn limit and let the verifier score the
+                        // workspace. Exiting 1 here erased trials whose work was complete.
+                        iterationLimited = true;
+                        break;
+                    }
                 }
-                write(
-                        output,
-                        Map.of("type", "eval.completed", "createdAt", Instant.now().toString()));
+                Map<String, Object> completed = new LinkedHashMap<>();
+                completed.put("type", "eval.completed");
+                completed.put("createdAt", Instant.now().toString());
+                if (iterationLimited) completed.put("stopReason", "iteration_limit");
+                write(output, completed);
             } catch (Exception error) {
                 // Provider exceptions can contain request details; retain only their class here.
                 write(

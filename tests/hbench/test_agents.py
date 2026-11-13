@@ -96,7 +96,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         for cls, version, stdout in (
             (FrozenCodex, CODEX_VERSION, "codex-cli " + CODEX_VERSION),
             (FrozenPi, PI_VERSION, PI_VERSION),
-            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, "agentscope-harness-eval 1.2.0"),
+            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, "agentscope-harness-eval 1.3.0"),
         ):
             with self.subTest(agent=cls.__name__):
                 agent = self.agent(cls)
@@ -118,7 +118,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         for cls, version, stdout in (
             (FrozenCodex, CODEX_VERSION, "codex-cli " + CODEX_VERSION),
             (FrozenPi, PI_VERSION, PI_VERSION),
-            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, "agentscope-harness-eval 1.2.0"),
+            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, "agentscope-harness-eval 1.3.0"),
         ):
             with self.subTest(agent=cls.__name__):
                 self.environment.exec.side_effect = None
@@ -285,7 +285,14 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(frozen_env.pop("PI_MCP_CONFIG_MODE"), "exclusive")
         self.assertEqual(frozen_env, native_execution["env"])
+        models_path = "/tmp/harbor-pi-agent/models.json"
+        frozen_models = json.loads(frozen_uploads.pop(models_path))
+        native_models = json.loads(uploads.pop(models_path))
         self.assertEqual(frozen_uploads, uploads)
+        # Bailian rejects the developer role; only the frozen endpoint disables it.
+        model = frozen_models["providers"]["harbor-endpoint"]["models"][0]
+        self.assertEqual(model.pop("compat"), {"supportsDeveloperRole": False})
+        self.assertEqual(frozen_models, native_models)
 
     def test_pi_cli_flags_preserve_parent_flags_and_quote_mcp_config(self):
         for servers in ([], [self.mcp()]):
@@ -475,6 +482,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             AgentScopeJava, extra_env={"MODEL_API_KEY": "java-key"}, max_turns=7,
             temperature=0.4, max_tokens=2048, extra_body={"enable_thinking": True, "seed": 8},
             turn_timeout_seconds=123, system_prompt="system text", mcp_servers=[self.mcp()],
+            context_window_tokens=131072,
         )
         agent.session_id = "harbor-session"
         context = AgentContext(metadata={"existing": True})
@@ -513,6 +521,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env["EVAL_STATE_DIR"], "/logs/agent/workspace-state")
         self.assertEqual(env["EVAL_SKILLS_DIR"], "")
         self.assertEqual(env["TURN_TIMEOUT_SECONDS"], "123")
+        self.assertEqual(env["EVAL_MODEL_CONTEXT_WINDOW"], "131072")
         self.assertEqual(json.loads(env["EVAL_MCP_SERVERS"])[0]["name"], "tools")
         self.assertIsNone(execution.kwargs["timeout_sec"])
         self.assertIsNone(execution.kwargs["user"])

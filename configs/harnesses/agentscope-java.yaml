@@ -2,9 +2,13 @@ name: agentscope-java
 import_path: hbench.agents:AgentScopeJava
 supported_api_formats: [openai_chat_completions]
 kwargs:
-  version: 1.2.0
+  version: 1.3.0
   max_turns: 60
   max_tokens: 8192
+  # Bailian model IDs are unknown to AgentScope, which then assumes a 64k input
+  # window while compaction uses a 160k fallback. Both matrix models accept at
+  # least 128k, so report that explicitly. 0 would fall back to name inference.
+  context_window_tokens: 131072
   temperature: 0.0
   extra_body:
     enable_thinking: false

@@ -66,6 +66,12 @@ if [ "${HB_DRY_RUN_ONLY:-0}" = 1 ]; then
   exit 0
 fi
 
+if [ "$cluster" = docker ]; then
+  # Reclaim networks left by interrupted runs: a long run can otherwise exhaust
+  # Docker's address pool. Only unused networks are removed, so this is safe.
+  docker network prune -f >/dev/null 2>&1 || echo "[cleanup] docker network prune failed; continuing" >&2
+fi
+
 oss_pid=
 if [ "$oss" = 1 ]; then
   nice -n 10 "$python" -m hbench archive "$job" --report "$report" --follow --parent $$ \
@@ -76,6 +82,10 @@ fi
 echo "==> Real run (calls models; may incur cost)"
 status=0
 "$python" -m hbench run --config "$plan" || status=$?
+
+if [ "$cluster" = docker ]; then
+  docker network prune -f >/dev/null 2>&1 || true
+fi
 
 echo "==> Summary"
 "$python" -m hbench summary "$job" --output "$report" || true

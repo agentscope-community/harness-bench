@@ -31,8 +31,25 @@ EOF
 curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh   # mainland: add --mirror Aliyun
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER" && newgrp docker
-# Optional: put Docker data on the big disk
-#   sudo mkdir -p /etc/docker && echo '{"data-root": "/data/docker"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+
+# Required: enlarge Docker's network address pools. Each trial creates its own compose
+# network and the default pools hold only ~15, so a concurrent run soon fails with
+# "could not find an available, non-overlapping IPv4 address pool"
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{
+  "default-address-pools": [
+    { "base": "10.200.0.0/16", "size": 24 },
+    { "base": "10.201.0.0/16", "size": 24 }
+  ]
+}
+EOF
+sudo systemctl restart docker
+# Keep base outside the VPC CIDR (see `ip -4 route`) and 100.64.0.0/10; merge
+# "data-root": "/data/docker" into the same daemon.json if Docker lives on another disk.
+docker network create netprobe >/dev/null && \
+  docker network inspect netprobe --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' && \
+  docker network rm netprobe >/dev/null          # should print 10.200.x.0/24
 
 docker info && docker compose version && java -version && mvn -v && python3.12 --version
 docker login
@@ -365,3 +382,13 @@ python -m unittest discover -s tests/hbench -p 'test_*.py'               # offli
 - Each plan runs once; render a new one to rerun (`run-matrix.sh` adds a timestamp).
 - `concurrency` is the total across all combinations.
 - Do not commit `.env` or `artifacts/`.
+
+### C1. Clean leftovers (when no run is active)
+
+Every trial, successful or failed, tears itself down with `docker compose down --rmi local --volumes --remove-orphans`, so containers, volumes and networks are removed. Only a hard kill (`kill -9`, OOM, SSH drop/SIGHUP) leaves them behind, and stale networks exhaust the address pool.
+
+```sh
+docker compose ls -a                                     # leftover compose projects
+docker ps -aq | xargs -r docker rm -f                    # leftover containers
+docker network prune -f                                  # unused networks
+```

@@ -30,8 +30,24 @@ EOF
 curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh   # 内地加 --mirror Aliyun
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER" && newgrp docker
-# 可选：Docker 数据放到大盘
-#   sudo mkdir -p /etc/docker && echo '{"data-root": "/data/docker"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+
+# 必需：扩容 Docker 网络地址池。每个 trial 建一个 compose 网络，默认池只够约 15 个，
+# 并发跑几分钟后就会报 "could not find an available, non-overlapping IPv4 address pool"
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{
+  "default-address-pools": [
+    { "base": "10.200.0.0/16", "size": 24 },
+    { "base": "10.201.0.0/16", "size": 24 }
+  ]
+}
+EOF
+sudo systemctl restart docker
+# base 要避开 VPC 网段（ip -4 route 查看）和 100.64.0.0/10；需要换 Docker 数据盘时把
+# "data-root": "/data/docker" 合并进同一个 daemon.json。
+docker network create netprobe >/dev/null && \
+  docker network inspect netprobe --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' && \
+  docker network rm netprobe >/dev/null          # 应输出 10.200.x.0/24
 
 docker info && docker compose version && java -version && mvn -v && python3.12 --version
 docker login
@@ -354,3 +370,13 @@ python -m unittest discover -s tests/hbench -p 'test_*.py'               # 离�
 - 每个计划只能执行一次，重跑要重新生成（`run-matrix.sh` 自动加时间戳）。
 - `concurrency` 是全部组合合计的并发数。
 - `.env`、`artifacts/` 不要提交。
+
+### C1. 清理残留（评测未在跑时）
+
+每个 trial 结束（成功或失败）都会自动执行 `docker compose down --rmi local --volumes --remove-orphans`，容器、卷和网络都会删掉；只有进程被 `kill -9` / OOM / SSH 断开（SIGHUP）打断时才会残留，残留网络会耗尽地址池。
+
+```sh
+docker compose ls -a                                     # 残留的 compose 项目
+docker ps -aq | xargs -r docker rm -f                    # 残留容器
+docker network prune -f                                  # 未使用的网络
+```

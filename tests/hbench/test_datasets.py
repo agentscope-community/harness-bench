@@ -16,6 +16,7 @@ import yaml
 from hbench.datasets import (
     TAU3_MAIN_IMAGE,
     TAU3_RUNTIME_IMAGE,
+    _adapt_tau3_verifier,
     dockerfile_base_image,
     file_sha256,
     prepare,
@@ -95,6 +96,35 @@ class PrepareTests(unittest.TestCase):
         config = tomllib.loads((self.output / self.task.name / "task.toml").read_text())
         self.assertEqual(config["environment"]["docker_image"], TAU3_MAIN_IMAGE)
         self.assertEqual(config["environment"]["workdir"], "/app")
+
+    def test_tau3_verifier_gets_explicit_communicate_scoring(self):
+        (self.task / "environment/Dockerfile").write_text("FROM python:3.12-slim\nWORKDIR /app\n")
+        (self.task / "environment/docker-compose.yaml").write_text(
+            yaml.safe_dump({"services": {"tau3-runtime": {}}})
+        )
+        (self.task / "tests/evaluate.py").write_text(
+            "def _compute_reward():\n"
+            '    get_now = _import_attr("tau2.utils.utils", "get_now")\n'
+            "    reward_info = evaluate_simulation(\n"
+            "        simulation=simulation,\n"
+            "        solo_mode=False,\n"
+            "    )\n"
+        )
+        before = source_hashes(self.task)
+        manifest = prepare(self.profile("tau3-bench"), self.source, self.output)
+        self.assertEqual(before, source_hashes(self.task))
+        text = (self.output / self.task.name / "tests/evaluate.py").read_text()
+        self.assertEqual(text.count("communicate_scoring="), 1)
+        self.assertIn(
+            "communicate_scoring=CommunicateScoring(scorer=CommunicateScorer.SUBSTRING),",
+            text,
+        )
+        self.assertIn('"tau2.data_model.semantic_communication", "CommunicateScoring"', text)
+        self.assertIn(
+            {"kind": "tau2_communicate_scoring_substring"},
+            manifest["tasks"][0]["adaptations"],
+        )
+        self.assertFalse(_adapt_tau3_verifier(self.output / self.task.name))
 
     def test_tau3_copy_failure_does_not_start_server(self):
         (self.task / "environment/Dockerfile").write_text("FROM python:3.12-slim\nWORKDIR /app\n")
@@ -249,7 +279,13 @@ class CachedDatasetTests(unittest.TestCase):
                     metadata = json.loads((output / task.name / "hbench.json").read_text())
                     self.assertEqual(metadata["main_entrypoint"], ["/app/entrypoint.sh"])
                     self.assertEqual(before["task.toml"], file_sha256(output / task.name / "task.toml"))
+                # Adapted files intentionally differ from the source copy.
+                adapted = {"task.toml", "environment/docker-compose.yaml"}
+                if name == "tau3-bench":
+                    adapted.add("tests/evaluate.py")
                 for relative, digest in before.items():
+                    if relative in adapted:
+                        continue
                     if relative == "instruction.md" or relative.startswith("tests/"):
                         self.assertEqual(digest, file_sha256(output / task.name / relative))
 
