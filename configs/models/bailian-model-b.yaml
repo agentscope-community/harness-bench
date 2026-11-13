@@ -1,0 +1,20 @@
+# Bailian (DashScope) OpenAI-compatible model B. No credentials in this file:
+# export HB_BAILIAN_API_KEY in the controller shell; set HB_MODEL_B_ID to the real model ID.
+# codex uses the Responses API; choose a model that Bailian serves on /responses.
+name: ${HB_MODEL_B_ID:-example-model-b}
+base_url: ${HB_BAILIAN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+api_key_name: HB_BAILIAN_API_KEY
+skip_model_parsing: true
+api_formats:
+  codex: openai_responses
+  pi: openai_chat_completions
+  agentscope-java: openai_chat_completions
+# Job-wide settings: every model in one matrix must keep these identical.
+environment_env:
+  OPENAI_API_KEY: ${HB_TAU_API_KEY:-}
+  OPENAI_BASE_URL: ${HB_TAU_BASE_URL:-}
+  TAU2_USER_MODEL: ${HB_TAU_USER_MODEL:-example-model}
+  TAU2_NL_ASSERTIONS_MODEL: ${HB_TAU_ASSERTIONS_MODEL:-example-model}
+verifier_env:
+  PIP_INDEX_URL: ${HB_PIP_INDEX_URL:-https://pypi.org/simple}
+  UV_DEFAULT_INDEX: ${HB_PIP_INDEX_URL:-https://pypi.org/simple}

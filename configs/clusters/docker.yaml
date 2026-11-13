@@ -1,0 +1,9 @@
+# Local Docker execution on the same Linux host as hbench (including Alibaba ECS).
+# No Kubernetes cluster, kubeconfig, registry push, or Docker-in-Docker is required.
+name: docker
+backend: docker
+kwargs:
+  harness_runtime_image: ${HB_RUNTIME_IMAGE:-hbench/harness-runtime:0.1.0}
+  image_map: {}
+  auto_mounting: true
+  keep_containers: false

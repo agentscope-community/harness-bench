@@ -1,0 +1,27 @@
+FROM python:3.12-slim
+
+ARG TAU2_BENCH_COMMIT=c06b07dd7c4d4ec61ba6ff9bcdf0b15dd7ef36d4
+ENV TAU2_BENCH_ROOT=/opt/tau2-bench \
+    TAU2_DATA_DIR=/opt/tau2-bench/data \
+    PYTHONUNBUFFERED=1 \
+    PATH=/root/.local/bin:$PATH
+WORKDIR /app
+
+# Original Hub Dockerfile cloned an unpinned HEAD. This is the read-only
+# ls-remote pin used by hbench, not a claim about the official package build.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && git init "${TAU2_BENCH_ROOT}" \
+    && git -C "${TAU2_BENCH_ROOT}" remote add origin https://github.com/sierra-research/tau2-bench.git \
+    && git -C "${TAU2_BENCH_ROOT}" fetch --depth=1 origin "${TAU2_BENCH_COMMIT}" \
+    && git -C "${TAU2_BENCH_ROOT}" checkout --detach FETCH_HEAD \
+    && test "$(git -C "${TAU2_BENCH_ROOT}" rev-parse HEAD)" = "${TAU2_BENCH_COMMIT}" \
+    && pip install --no-cache-dir "${TAU2_BENCH_ROOT}[knowledge]" "uv==0.7.13" \
+    && mkdir -p /root/.local/bin /opt/hbench \
+    && ln -s /usr/local/bin/uv /root/.local/bin/uv \
+    && pip freeze --all > /opt/hbench/requirements.freeze.txt \
+    && rm -rf /var/lib/apt/lists/*
+
+# Shared build context contains original server.py and every task configuration.
+COPY server.py /app/server.py
+COPY tasks/ /app/tasks/
+CMD ["sleep", "infinity"]

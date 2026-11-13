@@ -1,0 +1,12 @@
+# Send only runtime build inputs to the Docker daemon; never secrets or datasets.
+**
+!environments/
+!environments/hbench/
+!environments/hbench/Dockerfile.runtime
+!adapters/
+!adapters/agentscope-java/
+!adapters/agentscope-java/target/
+!adapters/agentscope-java/target/classes/
+!adapters/agentscope-java/target/classes/**
+!adapters/agentscope-java/target/dependency/
+!adapters/agentscope-java/target/dependency/**

@@ -1,0 +1,27 @@
+# Optional ACS profile: requires an ACS-enabled namespace and matching quotas.
+name: acs
+kwargs:
+  namespace: ${HB_NAMESPACE:-harness-bench}
+  kubeconfig: ${HB_KUBECONFIG:-}
+  context: ${HB_KUBE_CONTEXT:-}
+  registry: ${HB_REGISTRY:-example.invalid/hbench}
+  harness_runtime_image: ${HB_RUNTIME_IMAGE:-example.invalid/hbench/harness-runtime:0.1.0}
+  image_map: {}
+  image_pull_secret: ${HB_IMAGE_PULL_SECRET:-}
+  skip_image_check: true
+  compose: true
+  network_enforcement: none
+  transfer: chunked
+  pod_ready_timeout_sec: 1800
+  memory_limit_multiplier: 1.0
+  pod_overrides:
+    metadata:
+      annotations:
+        network.alibabacloud.com/enable-network-policy-agent: 'true'
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: main
+          securityContext:
+            privileged: false
+            runAsUser: 0

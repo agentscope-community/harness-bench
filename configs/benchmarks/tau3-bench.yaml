@@ -1,0 +1,6 @@
+name: tau3-bench
+package: sierra-research/tau3-bench
+version: sha256:a57304f682894ac061090769af771a3617664f3ff6e5417d4eadf8e30433e4d9
+expected_tasks: 375
+source_url: https://hub.harborframework.com/datasets/sierra-research/tau3-bench
+# Harbor Hub supplies tau3 (based on tau2), not the original tau2 benchmark.

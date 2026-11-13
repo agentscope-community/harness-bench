@@ -1,0 +1,7 @@
+name: pi
+import_path: hbench.agents:FrozenPi
+supported_api_formats: [openai_chat_completions, openai_responses, anthropic_messages]
+kwargs:
+  version: 1.5.2
+  reasoning_effort: medium
+  max_turns: 60

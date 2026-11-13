@@ -1,0 +1,20 @@
+# Replace via environment variables or supply your own profile. No key literals.
+name: ${HB_MODEL_ID:-example-model}
+base_url: ${HB_MODEL_BASE_URL:-https://example.invalid/v1}
+api_key_name: HB_MODEL_API_KEY
+skip_model_parsing: true
+# A comparison model endpoint must implement BOTH protocols used by the harnesses.
+api_formats:
+  codex: openai_responses
+  pi: openai_chat_completions
+  agentscope-java: openai_chat_completions
+# Used by tau3's simulated user and natural-language assertions, not the candidate.
+environment_env:
+  OPENAI_API_KEY: ${HB_TAU_API_KEY:-}
+  OPENAI_BASE_URL: ${HB_TAU_BASE_URL:-}
+  TAU2_USER_MODEL: ${HB_TAU_USER_MODEL:-example-model}
+  TAU2_NL_ASSERTIONS_MODEL: ${HB_TAU_ASSERTIONS_MODEL:-example-model}
+# Optional SWE-bench mirrors. Empty defaults retain upstream behavior.
+verifier_env:
+  PIP_INDEX_URL: ${HB_PIP_INDEX_URL:-https://pypi.org/simple}
+  UV_DEFAULT_INDEX: ${HB_PIP_INDEX_URL:-https://pypi.org/simple}

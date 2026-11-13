@@ -1,0 +1,5 @@
+name: swe-bench-verified
+package: swe-bench/swe-bench-verified
+version: sha256:b934b0cc3dc800fe945eaf9f1623329db97ee3133c706d20644524c7759fb341
+expected_tasks: 500
+source_url: https://hub.harborframework.com/datasets/swe-bench/swe-bench-verified

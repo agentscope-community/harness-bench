@@ -1,0 +1,26 @@
+FROM python:3.12-slim
+
+ARG TAU2_BENCH_COMMIT=c06b07dd7c4d4ec61ba6ff9bcdf0b15dd7ef36d4
+ENV TAU2_BENCH_ROOT=/opt/tau2-bench \
+    TAU2_DATA_DIR=/opt/tau2-bench/data \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# Direct pins; resolved transitive dependencies are recorded inside the image.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && git init "${TAU2_BENCH_ROOT}" \
+    && git -C "${TAU2_BENCH_ROOT}" remote add origin https://github.com/sierra-research/tau2-bench.git \
+    && git -C "${TAU2_BENCH_ROOT}" fetch --depth=1 origin "${TAU2_BENCH_COMMIT}" \
+    && git -C "${TAU2_BENCH_ROOT}" checkout --detach FETCH_HEAD \
+    && test "$(git -C "${TAU2_BENCH_ROOT}" rev-parse HEAD)" = "${TAU2_BENCH_COMMIT}" \
+    && pip install --no-cache-dir "${TAU2_BENCH_ROOT}[knowledge]" "fastmcp==3.0.2" \
+    && mkdir -p /opt/hbench \
+    && pip freeze --all > /opt/hbench/requirements.freeze.txt \
+    && apt-get purge -y --auto-remove git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY server.py /app/server.py
+COPY tasks/ /app/tasks/
+EXPOSE 8000
+# prepare supplies the task-specific copy + exec command, with no external vars.
+CMD ["python3", "/app/server.py"]

@@ -1,0 +1,53 @@
+# Copyright 2024-2026 the original author or authors.
+# SPDX-License-Identifier: Apache-2.0
+# Build context: repository root. Only explicitly user-authorized `images build --execute`
+# prepares target/classes and target/dependency with local Maven before docker build:
+# `mvn -f adapters/agentscope-java/pom.xml clean package dependency:copy-dependencies -DincludeScope=runtime`.
+# clean prevents stale mixed SNAPSHOT/BETA JARs on the wildcard classpath. Build never pushes.
+FROM node:22-bookworm-slim AS node
+FROM eclipse-temurin:21-jdk-jammy AS jdk
+FROM ghcr.io/astral-sh/uv:0.7.13 AS uv
+
+FROM python:3.12-slim-bookworm AS runtime
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash ca-certificates curl git ripgrep procps coreutils \
+    tar gzip bzip2 xz-utils unzip wget findutils \
+    libstdc++6 libgcc-s1 libgomp1 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
+COPY --from=uv /uv /uvx /usr/local/bin/
+COPY adapters/agentscope-java/target/classes/ /opt/harness/classes/
+COPY adapters/agentscope-java/target/dependency/ /opt/harness/dependency/
+
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="/opt/java/openjdk/bin:/usr/local/bin:${PATH}"
+
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 19)) throw new Error("Pi requires Node >=22.19.0")' \
+    && npm install -g @openai/codex@0.167.2 @earendil-works/pi-coding-agent@1.5.2 \
+    && npm install --prefix /opt/pi-mcp-adapter --ignore-scripts \
+        pi-mcp-adapter@7.0.1 @earendil-works/pi-coding-agent@1.5.2 \
+    && ln -s /opt/pi-mcp-adapter /tmp/harbor-pi-mcp-adapter \
+    && test "$(codex --version)" = 'codex-cli 0.167.2' \
+    && test "$(pi --version)" = '1.5.2' \
+    && test -f /tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts \
+    && test "$(node -p "require('/opt/pi-mcp-adapter/node_modules/pi-mcp-adapter/package.json').version")" = '7.0.1' \
+    && test "$(java -cp '/opt/harness/classes:/opt/harness/dependency/*' \
+        io.agentscope.examples.eval.HarnessEvalCli --version)" = 'agentscope-harness-eval 1.2.0' \
+    && npm cache clean --force
+
+LABEL org.harness-bench.codex.version="0.167.2" \
+      org.harness-bench.pi.version="1.5.2" \
+      org.harness-bench.pi-mcp-adapter.version="7.0.1" \
+      org.harness-bench.agentscope-cli.version="1.2.0"
+
+# Runtime mounts retain /usr/local/lib/node_modules, /opt/pi-mcp-adapter,
+# /opt/java/openjdk, /opt/harness and the /usr/local/bin tool paths.
+# Environment initialization/ENTRYPOINT belongs to the environment image.
+WORKDIR /workspace

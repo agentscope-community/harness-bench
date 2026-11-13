@@ -1,0 +1,16 @@
+# 3 datasets x 2 models x 3 harnesses = 18 combinations in one Harbor job.
+# Render: python -m hbench matrix --config configs/matrices/bailian-18.yaml --output artifacts/plans/bailian-18.yaml
+# Relative paths are repository-relative. Profile entries are names under configs/ or YAML paths.
+name: bailian-18
+cluster: docker            # docker | ack | acs | kubernetes | path to a cluster YAML
+dataset_root: artifacts/datasets
+benchmarks: [terminal-bench, swe-bench-verified, tau3-bench]
+models: [bailian-model-a, bailian-model-b]
+harnesses: [codex, pi, agentscope-java]
+concurrency: 4             # global limit on simultaneously running trials (across all 18 combinations)
+attempts: 1
+selection:                 # omit or leave empty for full datasets
+  n_tasks:                 # per-dataset cap, e.g. 1 for a smoke run
+  tasks:                   # exact task directory names, applied to every dataset
+  exclude_gpu: false
+image_map:                 # optional JSON from `images mirror` (ACK/ACS)

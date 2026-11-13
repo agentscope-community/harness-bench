@@ -1,0 +1,10 @@
+name: agentscope-java
+import_path: hbench.agents:AgentScopeJava
+supported_api_formats: [openai_chat_completions]
+kwargs:
+  version: 1.2.0
+  max_turns: 60
+  max_tokens: 8192
+  temperature: 0.0
+  extra_body:
+    enable_thinking: false

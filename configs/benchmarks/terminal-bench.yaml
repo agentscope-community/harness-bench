@@ -1,0 +1,5 @@
+name: terminal-bench
+package: terminal-bench/terminal-bench
+version: sha256:5881c1b1c74a96f07baef00a7c869e09802704bc0dc912c870e7acccc11440da
+expected_tasks: 66
+source_url: https://hub.harborframework.com/datasets/terminal-bench/terminal-bench
