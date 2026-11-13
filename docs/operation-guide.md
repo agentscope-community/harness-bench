@@ -10,18 +10,30 @@ Steps marked **billable** call the Bailian models.
 
 ### A1. Prepare the host
 
-- OS: Ubuntu 24.04 x86_64.
+- OS: CentOS Stream 9 x86_64 (CentOS 7 is not supported: no Python 3.12).
 - Region: Hong Kong (direct Docker Hub / PyPI / npm / Maven / GitHub access); mainland regions need mirrors.
 - Size: 4 vCPU / 8 GiB per concurrent trial. `HB_CONCURRENCY=4` → 16 vCPU / 64 GiB.
 - Disk: about 1 TB data disk for SWE-bench / Terminal-Bench images (estimate).
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y python3.12 python3.12-venv git rsync curl openjdk-21-jdk-headless maven skopeo
+sudo dnf install -y python3.12 python3.12-pip git rsync curl tar java-21-openjdk-devel skopeo
+
+# Maven 3.9 (the dnf maven package is too old and pulls in an older JDK)
+curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz \
+  | sudo tar -xz -C /opt
+cat >> ~/.bashrc <<'EOF'
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+export PATH=/opt/apache-maven-3.9.9/bin:$JAVA_HOME/bin:$PATH
+EOF
+. ~/.bashrc
+
+# Docker (remove podman-docker first if it is installed)
 curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh   # mainland: add --mirror Aliyun
+sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER" && newgrp docker
 # Optional: put Docker data on the big disk
-#   echo '{"data-root": "/data/docker"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+#   sudo mkdir -p /etc/docker && echo '{"data-root": "/data/docker"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+
 docker info && docker compose version && java -version && mvn -v && python3.12 --version
 docker login
 ```

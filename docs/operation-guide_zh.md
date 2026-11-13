@@ -9,18 +9,30 @@ A 部分用单机 Docker；B 部分是以后切到 ACK 的追加步骤。标 **�
 
 ### A1. 准备主机
 
-- 系统：Ubuntu 24.04 x86_64。
+- 系统：CentOS Stream 9 x86_64（不支持 CentOS 7：没有 Python 3.12）。
 - 地域：香港（可直连 Docker Hub / PyPI / npm / Maven / GitHub）；内地需配置镜像源。
 - 规格：每个并发 trial 按 4 vCPU / 8 GiB 计。`HB_CONCURRENCY=4` → 16 vCPU / 64 GiB。
 - 磁盘：数据盘约 1 TB（存放 SWE-bench / Terminal-Bench 镜像，估算值）。
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y python3.12 python3.12-venv git rsync curl openjdk-21-jdk-headless maven skopeo
+sudo dnf install -y python3.12 python3.12-pip git rsync curl tar java-21-openjdk-devel skopeo
+
+# Maven 3.9（dnf 自带的 maven 版本过旧，且会装上旧版 JDK）
+curl -fsSL https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz \
+  | sudo tar -xz -C /opt
+cat >> ~/.bashrc <<'EOF'
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+export PATH=/opt/apache-maven-3.9.9/bin:$JAVA_HOME/bin:$PATH
+EOF
+. ~/.bashrc
+
+# Docker（如已装 podman-docker，先卸载）
 curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh   # 内地加 --mirror Aliyun
+sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER" && newgrp docker
 # 可选：Docker 数据放到大盘
-#   echo '{"data-root": "/data/docker"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+#   sudo mkdir -p /etc/docker && echo '{"data-root": "/data/docker"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+
 docker info && docker compose version && java -version && mvn -v && python3.12 --version
 docker login
 ```
