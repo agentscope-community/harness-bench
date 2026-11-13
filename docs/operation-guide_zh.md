@@ -1,0 +1,245 @@
+# 操作指南
+
+English: [operation-guide.md](operation-guide.md) · 返回 [README](../README_zh.md)
+
+目标：在一台独立 ECS 上跑完整矩阵 `configs/matrices/bailian-18.yaml`（3 题库 × 2 模型 × 3 Harness = 18 组合）。
+A 部分用单机 Docker；B 部分是以后切到 ACK 的追加步骤。标 **计费** 的步骤会调用百炼模型。
+
+## A. 单机 Docker（ECS）
+
+### A1. 准备主机
+
+- 系统：Ubuntu 24.04 x86_64。
+- 地域：香港（可直连 Docker Hub / PyPI / npm / Maven / GitHub）；内地需配置镜像源。
+- 规格：每个并发 trial 按 4 vCPU / 8 GiB 计。`HB_CONCURRENCY=4` → 16 vCPU / 64 GiB。
+- 磁盘：数据盘约 1 TB（存放 SWE-bench / Terminal-Bench 镜像，估算值）。
+
+```sh
+sudo apt-get update
+sudo apt-get install -y python3.12 python3.12-venv git rsync curl openjdk-21-jdk-headless maven skopeo
+curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh   # 内地加 --mirror Aliyun
+sudo usermod -aG docker "$USER" && newgrp docker
+# 可选：Docker 数据放到大盘
+#   echo '{"data-root": "/data/docker"}' | sudo tee /etc/docker/daemon.json && sudo systemctl restart docker
+docker info && docker compose version && java -version && mvn -v && python3.12 --version
+docker login
+```
+
+### A2. 获取代码
+
+```sh
+git clone git@gitlab.alibaba-inc.com:ken.lj/harness-bench.git ~/harness-bench
+cd ~/harness-bench
+git switch datasets/bundled-prepared      # 可选：该分支已包含准备好的题库，A3 可跳过题库步骤
+```
+
+代码未推送时，在笔记本仓库根目录用 rsync：
+
+```sh
+rsync -az --exclude /.venv --exclude /artifacts --exclude target/ --exclude .env --exclude .DS_Store \
+  ./ <user>@<ECS_IP>:~/harness-bench/
+rsync -az artifacts/datasets <user>@<ECS_IP>:~/harness-bench/artifacts/   # 可选：带上题库
+```
+
+### A3. Python 环境与题库
+
+```sh
+cd ~/harness-bench
+python3.12 -m venv .venv && . .venv/bin/activate
+python -m pip install -r requirements-evals.txt
+# 已有 artifacts/datasets 时跳过下面两行
+python -m hbench datasets pull all
+python -m hbench datasets prepare all
+```
+
+检查：`artifacts/datasets/` 下有 `terminal-bench`（66 题）、`swe-bench-verified`（500）、`tau3-bench`（375）。
+
+### A4. 填写 `.env`
+
+```sh
+cp .env.example .env && chmod 600 .env
+vi .env
+```
+
+| 变量 | 填写 |
+| --- | --- |
+| `HB_BAILIAN_API_KEY` | 百炼 API Key |
+| `HB_BAILIAN_BASE_URL` | 默认 `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| `HB_MODEL_A_ID` / `HB_MODEL_B_ID` | 两个不同的模型 ID，都必须支持百炼 `/responses`（codex 需要） |
+| `HB_TAU_API_KEY` / `HB_TAU_BASE_URL` | 默认复用百炼 |
+| `HB_TAU_USER_MODEL` / `HB_TAU_ASSERTIONS_MODEL` | `openai/<model-id>`，可相同；对比期间不要改 |
+| `HB_PIP_INDEX_URL` | 可选，内地填 `https://mirrors.aliyun.com/pypi/simple/` |
+| `HB_RUNTIME_IMAGE` | `hbench/harness-runtime:0.1.0` |
+| `HB_CLUSTER` | `docker` |
+| `HB_CONCURRENCY` | 总并发 trial 数 |
+| `HB_N_TASKS` | 冒烟填 `1`；完整运行留空 |
+| `HB_DRY_RUN_ONLY` | `1` 只做 dry-run；`0` 真跑 |
+
+检查接口连通（不耗 token，200 正常，401 Key 错误）：
+
+```sh
+set -a; . ./.env; set +a
+curl -sS -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $HB_BAILIAN_API_KEY" "$HB_BAILIAN_BASE_URL/models"
+```
+
+### A5. 构建镜像
+
+```sh
+python -m hbench images build --runtime-image hbench/harness-runtime:0.1.0 \
+  --tau3-dataset artifacts/datasets/tau3-bench --execute
+docker image ls | grep -E 'hbench/(harness-runtime|tau3-main|tau3-runtime)'
+```
+
+检查：出现 `hbench/harness-runtime:0.1.0`、`hbench/tau3-main:0.1.0`、`hbench/tau3-runtime:0.1.0` 三个镜像。
+修改 `adapters/agentscope-java` 或 `environments/hbench/` 后重新执行本步。
+
+### A6. 预拉取题目镜像（可选）
+
+```sh
+for d in terminal-bench swe-bench-verified; do
+  python -m hbench images list "artifacts/datasets/$d" |
+    python -c 'import json,sys; print("\n".join(i for i in json.load(sys.stdin) if not i.startswith("hbench/")))'
+done | sed -E 's/:[^/@]+@/@/' | sort -u > artifacts/task-images.txt
+xargs -n1 docker pull < artifacts/task-images.txt
+docker system df
+```
+
+### A7. 冒烟（18 个 trial）
+
+`.env` 中设 `HB_N_TASKS=1`：
+
+```sh
+HB_DRY_RUN_ONLY=1 bash deploy/run-matrix.sh   # 只做 dry-run
+bash deploy/run-matrix.sh                     # 计费：真实运行 + 汇总
+```
+
+检查：打开输出的 `artifacts/reports/<name>/report.html`，18 个组合都有记录，没有镜像缺失、401/404 或 `/responses` 报错。
+
+3 道 Terminal-Bench 题需要 H100，纯 CPU 主机上会记为错误；要排除就在矩阵文件里设 `selection.exclude_gpu: true`。
+
+### A8. 完整运行（5646 个 trial）
+
+`.env` 中清空 `HB_N_TASKS`：
+
+```sh
+nohup bash deploy/run-matrix.sh > artifacts/run-matrix.log 2>&1 &   # 计费
+tail -f artifacts/run-matrix.log
+docker ps
+```
+
+中途看报告：
+
+```sh
+python -m hbench summary artifacts/jobs/<name> --output artifacts/reports/<name>-interim
+```
+
+进程中断后续跑（未经 hbench 实测；不行就重新执行 `bash deploy/run-matrix.sh`）：
+
+```sh
+set -a; . ./.env; set +a
+PYTHONPATH="$PWD" .venv/bin/harbor jobs resume -p artifacts/jobs/<name>
+```
+
+### A9. 取回结果
+
+在笔记本上：
+
+```sh
+rsync -az <user>@<ECS_IP>:~/harness-bench/artifacts/reports/ ./artifacts/reports/
+```
+
+报告：`artifacts/reports/<name>/summary.json` 和 `report.html`，每个 harness × 模型 × 题库一行。
+
+## B. ACK（以后）
+
+前提：ACR 命名空间（如 `registry.cn-hongkong.aliyuncs.com/<ns>`）、同地域 ACK 集群、ECS 上有 kubeconfig、Pod 能访问百炼。以下在 ECS 上执行。
+
+### B1. 构建并推送镜像
+
+```sh
+export REG=registry.cn-hongkong.aliyuncs.com/<ns>
+python -m hbench images build --runtime-image "$REG/harness-runtime:0.1.0" \
+  --tau3-dataset artifacts/datasets/tau3-bench --tau3-image-prefix "$REG/tau3" --execute
+BUILD_PLAN_JSON=<上一条输出的 plan_path>
+docker login "${REG%%/*}"
+docker push "$REG/harness-runtime:0.1.0"
+docker push "$REG/tau3-main:0.1.0"
+docker push "$REG/tau3-runtime:0.1.0"
+```
+
+### B2. 同步题目镜像到 ACR
+
+```sh
+skopeo login docker.io && skopeo login "${REG%%/*}"
+for d in terminal-bench swe-bench-verified tau3-bench; do
+  python -m hbench images mirror "artifacts/datasets/$d" --registry "$REG" \
+    --built-image-map "$BUILD_PLAN_JSON" --output "artifacts/image-map-$d.json" --execute
+done
+python - <<'EOF'
+import json
+merged = {}
+for d in ("terminal-bench", "swe-bench-verified", "tau3-bench"):
+    merged.update(json.load(open(f"artifacts/image-map-{d}.json"))["image_map"])
+with open("artifacts/image-map.json", "x") as f:
+    json.dump({"image_map": merged}, f, indent=2)
+print(len(merged), "mappings")
+EOF
+```
+
+去掉 `--execute` 并换一个 `--output` 文件名，可以先只生成计划检查。
+
+### B3. ACK 矩阵文件
+
+```sh
+cp configs/matrices/bailian-18.yaml configs/matrices/bailian-18-ack.yaml
+# 修改：cluster: ack    image_map: artifacts/image-map.json
+```
+
+### B4. 初始化命名空间（一次）
+
+```sh
+export KUBECONFIG=<path> CTX=<context>
+kubectl --context "$CTX" auth whoami
+kubectl --context "$CTX" apply -f deploy/k8s/namespace.yaml -f deploy/k8s/rbac.yaml
+kubectl --context "$CTX" -n harness-bench create rolebinding harness-bench-runner \
+  --role=harness-bench-runner --user=<上面查到的用户>
+kubectl --context "$CTX" -n harness-bench auth can-i create pods/exec
+read -rs ACR_PASSWORD
+kubectl --context "$CTX" -n harness-bench create secret docker-registry hb-acr \
+  --docker-server="${REG%%/*}" --docker-username=<acr-user> --docker-password="$ACR_PASSWORD"
+unset ACR_PASSWORD
+```
+
+### B5. 修改 `.env` 并运行
+
+```sh
+HB_MATRIX=configs/matrices/bailian-18-ack.yaml
+HB_CLUSTER=ack
+HB_REGISTRY=registry.cn-hongkong.aliyuncs.com/<ns>
+HB_RUNTIME_IMAGE=registry.cn-hongkong.aliyuncs.com/<ns>/harness-runtime:0.1.0
+HB_NAMESPACE=harness-bench
+HB_KUBECONFIG=<path>
+HB_KUBE_CONTEXT=<context>
+HB_IMAGE_PULL_SECRET=hb-acr
+```
+
+然后执行 A7、A8。
+
+注意：ACK 默认 `network_enforcement: none`，限制网络的题会被拒绝；GPU 题需要 H100 节点。
+
+## C. 常用命令
+
+```sh
+python -m hbench list                                                     # 列出题库/harness/模型/集群/矩阵 profile
+python -m hbench matrix --config configs/matrices/bailian-18.yaml \
+  --output artifacts/plans/<name>.yaml [--cluster ack] [--concurrency 8] [--n-tasks 1]
+python -m hbench run --config artifacts/plans/<name>.yaml --dry-run      # 不调用模型
+python -m hbench run --config artifacts/plans/<name>.yaml                # 计费
+python -m hbench summary artifacts/jobs/<name> --output artifacts/reports/<name>
+python -m hbench images list artifacts/datasets/<dataset>
+python -m unittest discover -s tests/hbench -p 'test_*.py'               # 离线单测
+```
+
+- 每个计划只能执行一次，重跑要重新生成（`run-matrix.sh` 自动加时间戳）。
+- `concurrency` 是全部组合合计的并发数。
+- `.env`、`artifacts/` 不要提交。
