@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hbench 评测控制台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/jobs">hbench 控制台</a>
+  <nav>
+    <a href="#/jobs" data-nav="jobs">结果</a>
+    <a href="#/runs" data-nav="runs">运行</a>
+    <a href="#/runs/new" data-nav="new">新建运行</a>
+    <a href="#/compare" data-nav="compare">对比</a>
+  </nav>
+  <span id="mode" class="mode"></span>
+</header>
+<main id="app" class="page"><p class="muted">加载中…</p></main>
+<footer class="foot">
+  适配评测，非官方榜单；错误、未评分与缺失 trial 均不计为通过。
+</footer>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

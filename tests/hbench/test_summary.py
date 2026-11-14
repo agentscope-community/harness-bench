@@ -101,8 +101,8 @@ class SummaryTests(unittest.TestCase):
         self.assertNotIn("file://", page)
         self.assertIn("task__trial-1", page)
         trial = summary["trials"][0]
-        self.assertEqual((trial["trial"], trial["agent"], trial["reward"], trial["error"]),
-                         ("task__trial-1", "pi", 1, None))
+        self.assertEqual((trial["trial"], trial["task"], trial["agent"], trial["reward"], trial["error"]),
+                         ("task__trial-1", "task", "pi", 1, None))
         self.assertEqual((trial["input_tokens"], trial["output_tokens"], trial["evidence"]), (7, 3, "../job/result.json"))
         self.assertIn('name="viewport" content="width=device-width, initial-scale=1"', page)
         self.assertIn('.table-scroll{overflow-x:auto}', page)

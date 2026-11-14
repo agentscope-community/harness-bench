@@ -41,7 +41,9 @@ def _trial_rows(rows, evidence):
         except (TypeError, ValueError):
             pass
         contexts = _contexts(row)
-        result.append({"trial": row["trial_name"], "agent": row["agent_info"]["name"],
+        # Harbor names trials "<task>[__<suffix>]"; the recorded field is authoritative.
+        task = row.get("task_name") or row["trial_name"].rsplit("__", 1)[0]
+        result.append({"trial": row["trial_name"], "task": task, "agent": row["agent_info"]["name"],
                        "model": (row["agent_info"].get("model_info") or {}).get("name", "unknown"),
                        "dataset": row.get("source") or "adhoc",
                        "reward": ((row.get("verifier_result") or {}).get("rewards") or {}).get("reward"),
@@ -248,11 +250,11 @@ def summarize_job(folder, output):
     for g in summary["groups"]:
         values = [g["agent"], g["model"], g["dataset"], g["planned"], g["recorded"], g["missing"], g["errors"], g["scored"], g["passed"], g["pass_rate_recorded"], g["pass_rate_planned"], g["mean_reward_scored"]]
         table += "<tr>" + "".join(cell(v) for v in values) + "</tr>"
-    trial_headers = ["Trial", "Harness", "Model", "Dataset", "Reward", "Error", "Duration (s)", "Input tokens", "Output tokens"]
+    trial_headers = ["Trial", "Task", "Harness", "Model", "Dataset", "Reward", "Error", "Duration (s)", "Input tokens", "Output tokens"]
     trials = "<tr>" + "".join("<th>" + html.escape(h) + "</th>" for h in trial_headers) + "</tr>"
     for t in summary["trials"]:
         name = f'<td><a href="{html.escape(t["evidence"], quote=True)}">{html.escape(t["trial"])}</a></td>'
-        trials += "<tr>" + name + "".join(cell(t[k]) for k in ("agent", "model", "dataset", "reward", "error", "duration_sec", "input_tokens", "output_tokens")) + "</tr>"
+        trials += "<tr>" + name + "".join(cell(t[k]) for k in ("task", "agent", "model", "dataset", "reward", "error", "duration_sec", "input_tokens", "output_tokens")) + "</tr>"
     evidence_list = "".join(f'<li><a href="{html.escape(url, quote=True)}">{html.escape(name)}</a></li>' for name, url in links)
     page = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Harness evaluation</title><style>body{font:15px system-ui;margin:24px;max-width:1200px;overflow-wrap:anywhere}.table-scroll{overflow-x:auto}table{border-collapse:collapse}th,td{padding:10px;border:1px solid #ddd;text-align:left;overflow-wrap:normal}th{background:#eef2f7}</style><h1>Harness evaluation</h1>'
     page += f'<p>Recorded: {summary["recorded_trials"]}; planned: {planned}; missing: {summary["missing_trials"]}; pass rate (planned): {summary["pass_rate_planned"]}</p><p>{html.escape(summary["note"])}</p><div class="table-scroll"><table>{table}</table></div>'

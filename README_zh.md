@@ -58,6 +58,19 @@ flowchart LR
 
 凭证放在控制机的 `.env` 文件里。配置文件和运行计划都不包含凭证，`.env` 也不提交到 Git。
 
+## 可视化控制台
+
+`hbench_console` 在 hbench 之上提供运行管理和结果看板，不重写 Harbor 的调度与证据链：
+
+```bash
+python -m hbench_console --port 8090            # 看板默认只读已有结果
+CONSOLE_ALLOW_REAL_RUNS=1 python -m hbench_console   # 同时允许发起付费运行
+```
+
+控制台扫描 `artifacts/jobs/`（可指向 OSS 同步下来的镜像目录），调用 `hbench summary` 建索引，
+按 harness × model × dataset 展示通过率和逐题明细。真实运行默认关闭；凭证只从控制台进程的
+环境变量读取，不落库。设计与接口见 [评测控制台执行文档](docs/console-plan.md)。
+
 ## 目录结构
 
 | 路径 | 内容 |
@@ -67,7 +80,9 @@ flowchart LR
 | `deploy/` | 运行评测矩阵的脚本 `run-matrix.sh` 和 Kubernetes 清单 |
 | `environments/hbench/` | 运行时镜像与 tau3 镜像的 Dockerfile |
 | `adapters/agentscope-java/` | AgentScope Java Harness 适配器 |
+| `hbench_console/` | 可视化控制台：运行管理、结果看板、只读证据 |
 | `tests/hbench/` | CLI 离线测试 |
+| `tests/console/` | 控制台离线测试 |
 | `artifacts/` | 下载的文件、预处理后的题库、运行计划、任务记录和评测报告 |
 
 Git 默认忽略 `artifacts/`。在 `datasets/bundled-prepared` 分支上，仓库里已经包含了 `artifacts/datasets/` 下预处理好的题库。

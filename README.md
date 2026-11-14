@@ -58,6 +58,20 @@ The datasets supply the task images. Run `python -m hbench images build` to buil
 
 Keep credentials in the controller host’s `.env` file and out of configuration files, run plans, and Git.
 
+## Local console
+
+`hbench_console` adds run management and result dashboards on top of hbench without reimplementing Harbor’s scheduling or evidence chain:
+
+```bash
+python -m hbench_console --port 8090                  # read-only over existing results
+CONSOLE_ALLOW_REAL_RUNS=1 python -m hbench_console    # also allow paid runs
+```
+
+It indexes `artifacts/jobs/` (or an OSS mirror directory) through `hbench summary` and shows
+pass rates by harness × model × dataset plus per-task and per-trial detail. Real runs are off by
+default; credentials are read from the console process environment and never stored. See the
+[console execution document](docs/console-plan.md).
+
 ## Repository layout
 
 | Path | Contents |
@@ -67,7 +81,9 @@ Keep credentials in the controller host’s `.env` file and out of configuration
 | `deploy/` | `run-matrix.sh` for running a benchmark matrix, plus Kubernetes manifests |
 | `environments/hbench/` | Dockerfiles for the harness runtime and tau3 images |
 | `adapters/agentscope-java/` | AgentScope Java harness adapter |
+| `hbench_console/` | Local console: run management, dashboards, read-only evidence |
 | `tests/hbench/` | Offline tests for the CLI |
+| `tests/console/` | Offline tests for the console |
 | `artifacts/` | Downloads, prepared datasets, run plans, job records, and reports |
 
 Git ignores `artifacts/` by default. The `datasets/bundled-prepared` branch includes the prepared datasets in `artifacts/datasets/`.

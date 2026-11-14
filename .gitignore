@@ -66,3 +66,9 @@ nohup.out
 /configs/acs-*-preflight-mutation.json
 /configs/acs-*-preflight-skills.json
 /configs/business-cluster-expansion.json
+
+# Console runtime state defaults to artifacts/ (ignored); also ignore SQLite
+# sidecar files if CONSOLE_DATA_DIR points at the repository root.
+/*.db
+/*.db-wal
+/*.db-shm
