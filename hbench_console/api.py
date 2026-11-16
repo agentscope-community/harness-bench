@@ -19,6 +19,7 @@ import yaml
 from . import __version__
 from .config import REPO_ROOT, Settings
 from .db import Database
+from .diagnosis import diagnose
 from .ingest import Ingestor
 from .runner import NAME, Runner
 
@@ -286,7 +287,16 @@ def create_app(settings: Settings, console: Console | None = None,
         total, rows = state.database.query_trials(
             name, agent=agent, model=model, dataset=dataset, outcome=outcome, query=q,
             limit=max(1, min(limit, 1000)), offset=max(0, offset))
-        return {"total": total, "trials": rows}
+        return {"total": total, "trials": [{**row, **diagnose(row)} for row in rows]}
+
+    @app.get("/api/jobs/{name}/missing")
+    def missing_trials(name: str, limit: int = 2000):
+        if state.database.get_job(name) is None:
+            raise HTTPException(404, "作业不存在")
+        total, rows = state.database.missing_trials(name, max(1, min(limit, 10000)))
+        return {"total": total, "missing": rows,
+                "note": "缺失由 job 的 config/lock 与已记录 trial 求差集得到；"
+                        "若作业使用整库或 glob，无法逐题枚举，只能看组合汇总的计数。"}
 
     @app.get("/api/jobs/{name}/tasks")
     def job_tasks(name: str):

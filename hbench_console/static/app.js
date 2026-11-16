@@ -198,6 +198,31 @@ function comboTable(combos) {
         cell(num(c.input_tokens)), cell(num(c.output_tokens)))))));
 }
 
+function evidenceLinks(job, trial) {
+  const links = trial.evidence_links && trial.evidence_links.length ? trial.evidence_links
+    : trial.evidence ? [{ label: "result.json", path: trial.evidence }] : [];
+  if (!links.length) return h("span", { class: "muted", text: "—" });
+  const parts = [];
+  links.forEach((item, index) => {
+    if (index) parts.push(" · ");
+    parts.push(h("a", {
+      href: `/api/evidence/${encodeURIComponent(job.name)}/${item.path}`,
+      target: "_blank", rel: "noopener", text: item.label,
+    }));
+  });
+  return h("div", {}, parts);
+}
+
+function diagnosisCell(trial) {
+  if (!trial.error && !trial.error_label) return h("span", { class: "muted", text: "" });
+  return h("div", {},
+    trial.error ? h("strong", { text: trial.error }) : h("strong", { text: trial.error_label }),
+    trial.error && trial.error_label && trial.error_label !== trial.error
+      ? h("div", { text: trial.error_label }) : null,
+    trial.error_message ? h("div", { text: trial.error_message, title: trial.error_message }) : null,
+    trial.error_hint ? h("div", { class: "muted", text: `处置：${trial.error_hint}` }) : null);
+}
+
 function trialsCard(job) {
   const filter = { agent: "", model: "", dataset: "", outcome: "", q: "", limit: 100, offset: 0 };
   const results = h("div", {});
@@ -217,7 +242,7 @@ function trialsCard(job) {
   const agents = [...new Set(job.combos.map(c => c.agent))].sort();
   const models = [...new Set(job.combos.map(c => c.model))].sort();
   const datasets = [...new Set(job.combos.map(c => c.dataset))].sort();
-  const search = h("input", { placeholder: "搜索 trial / 任务", size: 22,
+  const search = h("input", { placeholder: "搜索 trial / 任务 / 错误", size: 24,
     oninput: (event) => { filter.q = event.target.value.trim(); filter.offset = 0; load(); } });
 
   async function load() {
@@ -227,8 +252,9 @@ function trialsCard(job) {
     try {
       const data = await api(`/api/jobs/${encodeURIComponent(job.name)}/trials?${params}`);
       const rows = data.trials.map(t => {
-        const outcome = t.error ? badge("错误", "bad")
+        const outcome = t.error ? badge(t.error_label || "错误", "bad")
           : t.reward === 1 ? badge("通过", "ok")
+          : t.error_label ? badge(t.error_label, "warn")
           : t.reward === null || t.reward === undefined ? badge("未评分", "warn")
           : badge("失败", "bad");
         return h("tr", {},
@@ -239,10 +265,8 @@ function trialsCard(job) {
           h("td", { class: "num", text: t.reward === null || t.reward === undefined ? "—" : String(t.reward) }),
           h("td", { class: "num", text: t.duration_sec === null || t.duration_sec === undefined ? "—" : `${t.duration_sec}s` }),
           h("td", { class: "num", text: `${num(t.input_tokens)} / ${num(t.output_tokens)}` }),
-          h("td", {}, t.evidence
-            ? h("a", { href: `/api/evidence/${encodeURIComponent(job.name)}/${t.evidence}`, target: "_blank", rel: "noopener", text: "result.json" })
-            : h("span", { class: "muted", text: "—" })),
-          h("td", { class: "muted", text: t.error || "" }));
+          h("td", {}, evidenceLinks(job, t)),
+          h("td", { class: "muted" }, diagnosisCell(t)));
       });
       results.replaceChildren(h("div", { class: "table-wrap" },
         h("table", {},
@@ -279,6 +303,39 @@ function trialsCard(job) {
   return { node, apply };
 }
 
+function missingCard(job) {
+  const total = job.combos.reduce((sum, c) => sum + (c.missing || 0), 0);
+  if (!total) return null;
+  const body = h("div", {});
+  const details = h("details", {},
+    h("summary", { text: `未运行 trial：${num(total)}（展开逐题明细）` }),
+    h("p", { class: "muted", text: "缺失 = job 计划 - 已记录 trial。用于定位调度取消、地址池耗尽或任务未启动。" }),
+    body);
+  let loaded = false;
+  details.addEventListener("toggle", async () => {
+    if (!details.open || loaded) return;
+    loaded = true;
+    body.replaceChildren(h("p", { class: "muted", text: "加载中…" }));
+    try {
+      const data = await api(`/api/jobs/${encodeURIComponent(job.name)}/missing`);
+      if (!data.missing.length) {
+        body.replaceChildren(h("p", { class: "muted", text: "没有可枚举的缺失明细（作业可能使用整库或 glob）。" }));
+        return;
+      }
+      body.replaceChildren(
+        h("div", { class: "table-wrap" }, h("table", {},
+          h("thead", {}, h("tr", {}, ["Dataset", "任务", "Harness", "Model", "缺失 attempt"].map(x => h("th", { text: x })))),
+          h("tbody", {}, data.missing.map(m => h("tr", {},
+            h("td", { text: m.dataset }), h("td", { text: m.task }), h("td", { text: m.agent }),
+            h("td", { text: m.model }), h("td", { class: "num", text: m.missing })))))),
+        h("p", { class: "muted", text: `显示 ${num(data.missing.length)} 行，缺失 attempt 合计 ${num(data.total)}。` }));
+    } catch (error) {
+      body.replaceChildren(errorBox(error));
+    }
+  });
+  return h("div", { class: "card" }, h("h2", { text: "缺失明细" }), details);
+}
+
 async function renderJob(name) {
   const job = await api(`/api/jobs/${encodeURIComponent(name)}`);
   await loadCatalog();
@@ -292,6 +349,7 @@ async function renderJob(name) {
   const totalPlanned = job.combos.reduce((sum, c) => sum + (c.planned || 0), 0);
   const totalPassed = job.combos.reduce((sum, c) => sum + (c.passed || 0), 0);
   const totalErrors = job.combos.reduce((sum, c) => sum + (c.errors || 0), 0);
+  const totalMissing = job.combos.reduce((sum, c) => sum + (c.missing || 0), 0);
 
   fill(app, 
     job.fixture ? fixtureBanner() : null,
@@ -307,12 +365,14 @@ async function renderJob(name) {
         stat("通过 / 计划", `${num(totalPassed)} / ${num(totalPlanned)}`),
         stat("通过率（计划）", pct(job.pass_rate_planned)),
         stat("错误 trial", num(totalErrors)),
+        stat("缺失 trial", num(totalMissing)),
         stat("组合数", num(job.combos.length))),
       h("p", { class: "muted", text: job.note || "" }),
       h("p", { class: "muted" }, "证据目录：", h("code", { text: job.path })),
       job.error ? h("p", { class: "error", text: `索引错误：${job.error}` }) : null),
     ...sections,
     h("div", { class: "card" }, h("h2", { text: "组合汇总" }), comboTable(job.combos)),
+    missingCard(job),
     trials.node,
   );
 }

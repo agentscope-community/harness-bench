@@ -27,12 +27,24 @@ def _link(path, output):
     return quote(Path(os.path.relpath(path, output)).as_posix())
 
 
+def _error_message(info):
+    """First line of the recorded exception, long enough to identify the cause."""
+    if not isinstance(info, dict):
+        return None
+    message = info.get("exception_message")
+    if not isinstance(message, str):
+        return None
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    return lines[0][:300] if lines else None
+
+
 def _trial_rows(rows, evidence):
     """One line per recorded trial, for following up on individual tasks."""
     result = []
     for identifier, row in sorted(rows.items(), key=lambda item: (item[1]["trial_name"], item[0])):
         exceptions = [row.get("exception_info")] + [s.get("exception_info") for s in row.get("step_results") or []]
-        error = next((e.get("exception_type") for e in exceptions if e), None)
+        recorded = next((e for e in exceptions if e), None)
+        error = recorded.get("exception_type") if recorded else None
         duration = None
         try:
             if row.get("started_at") and row.get("finished_at"):
@@ -47,7 +59,8 @@ def _trial_rows(rows, evidence):
                        "model": (row["agent_info"].get("model_info") or {}).get("name", "unknown"),
                        "dataset": row.get("source") or "adhoc",
                        "reward": ((row.get("verifier_result") or {}).get("rewards") or {}).get("reward"),
-                       "error": error, "duration_sec": duration,
+                       "error": error, "error_message": _error_message(recorded),
+                       "duration_sec": duration,
                        "input_tokens": sum(c.get("n_input_tokens") or 0 for c in contexts),
                        "output_tokens": sum(c.get("n_output_tokens") or 0 for c in contexts),
                        "evidence": evidence[identifier]})
@@ -250,11 +263,11 @@ def summarize_job(folder, output):
     for g in summary["groups"]:
         values = [g["agent"], g["model"], g["dataset"], g["planned"], g["recorded"], g["missing"], g["errors"], g["scored"], g["passed"], g["pass_rate_recorded"], g["pass_rate_planned"], g["mean_reward_scored"]]
         table += "<tr>" + "".join(cell(v) for v in values) + "</tr>"
-    trial_headers = ["Trial", "Task", "Harness", "Model", "Dataset", "Reward", "Error", "Duration (s)", "Input tokens", "Output tokens"]
+    trial_headers = ["Trial", "Task", "Harness", "Model", "Dataset", "Reward", "Error", "Error message", "Duration (s)", "Input tokens", "Output tokens"]
     trials = "<tr>" + "".join("<th>" + html.escape(h) + "</th>" for h in trial_headers) + "</tr>"
     for t in summary["trials"]:
         name = f'<td><a href="{html.escape(t["evidence"], quote=True)}">{html.escape(t["trial"])}</a></td>'
-        trials += "<tr>" + name + "".join(cell(t[k]) for k in ("task", "agent", "model", "dataset", "reward", "error", "duration_sec", "input_tokens", "output_tokens")) + "</tr>"
+        trials += "<tr>" + name + "".join(cell(t[k]) for k in ("task", "agent", "model", "dataset", "reward", "error", "error_message", "duration_sec", "input_tokens", "output_tokens")) + "</tr>"
     evidence_list = "".join(f'<li><a href="{html.escape(url, quote=True)}">{html.escape(name)}</a></li>' for name, url in links)
     page = '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Harness evaluation</title><style>body{font:15px system-ui;margin:24px;max-width:1200px;overflow-wrap:anywhere}.table-scroll{overflow-x:auto}table{border-collapse:collapse}th,td{padding:10px;border:1px solid #ddd;text-align:left;overflow-wrap:normal}th{background:#eef2f7}</style><h1>Harness evaluation</h1>'
     page += f'<p>Recorded: {summary["recorded_trials"]}; planned: {planned}; missing: {summary["missing_trials"]}; pass rate (planned): {summary["pass_rate_planned"]}</p><p>{html.escape(summary["note"])}</p><div class="table-scroll"><table>{table}</table></div>'

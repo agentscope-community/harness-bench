@@ -103,6 +103,7 @@ class SummaryTests(unittest.TestCase):
         trial = summary["trials"][0]
         self.assertEqual((trial["trial"], trial["task"], trial["agent"], trial["reward"], trial["error"]),
                          ("task__trial-1", "task", "pi", 1, None))
+        self.assertIsNone(trial["error_message"])
         self.assertEqual((trial["input_tokens"], trial["output_tokens"], trial["evidence"]), (7, 3, "../job/result.json"))
         self.assertIn('name="viewport" content="width=device-width, initial-scale=1"', page)
         self.assertIn('.table-scroll{overflow-x:auto}', page)
@@ -111,12 +112,16 @@ class SummaryTests(unittest.TestCase):
     def test_trial_rows_report_error_and_duration(self):
         raw = self.trial(reward=None)
         raw.update(started_at="2026-11-12T00:00:00Z", finished_at="2026-11-12T00:01:30.5Z",
-                   exception_info={"exception_type": "AgentTimeoutError", "exception_message": "x",
+                   exception_info={"exception_type": "AgentTimeoutError",
+                                   "exception_message": "first line\nsecond line",
                                    "exception_traceback": "", "occurred_at": "2026-11-12T00:01:30Z"})
         self.job_result([raw], 1)
         trial = self.summarize()["trials"][0]
-        self.assertEqual((trial["error"], trial["duration_sec"], trial["reward"]), ("AgentTimeoutError", 90.5, None))
-        self.assertIn("<td>AgentTimeoutError</td>", (self.output / "report.html").read_text())
+        self.assertEqual((trial["error"], trial["error_message"], trial["duration_sec"], trial["reward"]),
+                         ("AgentTimeoutError", "first line", 90.5, None))
+        page = (self.output / "report.html").read_text()
+        self.assertIn("<td>AgentTimeoutError</td><td>first line</td>", page)
+        self.assertIn("Error message", page)
 
     def test_normalized_duplicate_keeps_both_evidence_links(self):
         raw = self.trial(171)

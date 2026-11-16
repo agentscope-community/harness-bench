@@ -5,6 +5,7 @@ be served without rescanning thousands of trial directories on every request.
 """
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 import sqlite3
 from pathlib import Path
 
@@ -66,13 +67,24 @@ CREATE TABLE IF NOT EXISTS trials (
     dataset TEXT,
     reward REAL,
     error TEXT,
+    error_message TEXT,
     duration_sec REAL,
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     evidence TEXT,
+    evidence_links TEXT,
     PRIMARY KEY (job, trial)
 );
 CREATE INDEX IF NOT EXISTS trials_job ON trials (job);
+CREATE TABLE IF NOT EXISTS missing_trials (
+    job TEXT NOT NULL,
+    dataset TEXT NOT NULL,
+    task TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    model TEXT NOT NULL,
+    missing INTEGER NOT NULL,
+    PRIMARY KEY (job, dataset, task, agent, model)
+);
 """
 
 RUN_FIELDS = ("name", "status", "matrix_yaml", "plan_path", "job_dir", "planned_trials",
@@ -104,6 +116,11 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
             connection.executescript(SCHEMA)
+            # Console databases created before diagnostics existed keep working.
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(trials)")}
+            for name, kind in (("error_message", "TEXT"), ("evidence_links", "TEXT")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE trials ADD COLUMN {name} {kind}")
 
     # ---------------------------------------------------------------- runs
     def create_run(self, name: str, matrix_yaml: str, dry_run: bool):
@@ -150,7 +167,8 @@ class Database:
                 (now(),))
 
     # ---------------------------------------------------------------- jobs
-    def replace_job(self, job: dict, combos: list[dict], trials: list[dict]):
+    def replace_job(self, job: dict, combos: list[dict], trials: list[dict],
+                    missing: list[dict] | None = None):
         with self.connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO jobs (name, path, origin, fixture, updated_at, "
@@ -161,6 +179,7 @@ class Database:
                  job.get("pass_rate_planned"), job.get("note"), job.get("error")))
             connection.execute("DELETE FROM combos WHERE job = ?", (job["name"],))
             connection.execute("DELETE FROM trials WHERE job = ?", (job["name"],))
+            connection.execute("DELETE FROM missing_trials WHERE job = ?", (job["name"],))
             connection.executemany(
                 "INSERT INTO combos (job, agent, model, dataset, planned, recorded, missing, "
                 "errors, scored, passed, unscored, pass_rate_planned, pass_rate_recorded, "
@@ -173,12 +192,18 @@ class Database:
                  for c in combos])
             connection.executemany(
                 "INSERT INTO trials (job, trial, task, agent, model, dataset, reward, error, "
-                "duration_sec, input_tokens, output_tokens, evidence) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "error_message, duration_sec, input_tokens, output_tokens, evidence, evidence_links) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(job["name"], t["trial"], t.get("task"), t.get("agent"), t.get("model"),
-                  t.get("dataset"), t.get("reward"), t.get("error"), t.get("duration_sec"),
-                  t.get("input_tokens") or 0, t.get("output_tokens") or 0, t.get("evidence"))
+                  t.get("dataset"), t.get("reward"), t.get("error"), t.get("error_message"),
+                  t.get("duration_sec"), t.get("input_tokens") or 0,
+                  t.get("output_tokens") or 0, t.get("evidence"), t.get("evidence_links"))
                  for t in trials])
+            connection.executemany(
+                "INSERT INTO missing_trials (job, dataset, task, agent, model, missing) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(job["name"], m["dataset"], m["task"], m["agent"], m["model"], m["missing"])
+                 for m in missing or []])
 
     def record_job_error(self, name: str, path: str, error: str):
         with self.connect() as connection:
@@ -193,6 +218,7 @@ class Database:
             connection.execute("DELETE FROM jobs WHERE name = ?", (name,))
             connection.execute("DELETE FROM combos WHERE job = ?", (name,))
             connection.execute("DELETE FROM trials WHERE job = ?", (name,))
+            connection.execute("DELETE FROM missing_trials WHERE job = ?", (name,))
 
     def job_names(self):
         with self.connect() as connection:
@@ -234,8 +260,9 @@ class Database:
             clauses.append("dataset = ?")
             values.append(dataset)
         if query:
-            clauses.append("(trial LIKE ? OR task LIKE ?)")
-            values.extend([f"%{query}%", f"%{query}%"])
+            clauses.append("(trial LIKE ? OR task LIKE ? OR error LIKE ? OR error_message LIKE ?)")
+            pattern = f"%{query}%"
+            values.extend([pattern, pattern, pattern, pattern])
         if outcome == "passed":
             clauses.append("error IS NULL AND reward = 1")
         elif outcome == "failed":
@@ -252,6 +279,27 @@ class Database:
                 f"SELECT * FROM trials WHERE {where} "
                 "ORDER BY dataset, agent, model, trial LIMIT ? OFFSET ?",
                 (*values, limit, offset)).fetchall()
+        return total, [self._trial(row) for row in rows]
+
+    @staticmethod
+    def _trial(row):
+        trial = dict(row)
+        raw = trial.get("evidence_links")
+        try:
+            trial["evidence_links"] = json.loads(raw) if raw else []
+        except ValueError:
+            trial["evidence_links"] = []
+        return trial
+
+    def missing_trials(self, job: str, limit: int = 2000):
+        with self.connect() as connection:
+            total = connection.execute(
+                "SELECT COALESCE(SUM(missing), 0) FROM missing_trials WHERE job = ?",
+                (job,)).fetchone()[0]
+            rows = connection.execute(
+                "SELECT dataset, task, agent, model, missing FROM missing_trials "
+                "WHERE job = ? ORDER BY dataset, agent, model, task LIMIT ?",
+                (job, limit)).fetchall()
         return total, [dict(row) for row in rows]
 
     def job_trials(self, job: str):

@@ -14,6 +14,7 @@ from hbench_console.api import create_app
 from hbench_console.config import REPO_ROOT, Settings
 from hbench_console.demo import build
 from hbench_console.db import Database
+from hbench_console.diagnosis import diagnose
 from hbench_console.ingest import Ingestor
 from hbench_console.runner import Runner, RunnerError
 
@@ -94,6 +95,29 @@ class ConsoleFixture(unittest.TestCase):
         return name
 
 
+class DiagnosisTests(unittest.TestCase):
+    def test_zero_tokens_without_exception_is_flagged(self):
+        self.assertEqual(diagnose({"input_tokens": 0, "output_tokens": 0, "reward": 0.0})["error_label"],
+                         "疑似首次调用失败")
+        self.assertFalse(diagnose({"input_tokens": 0, "output_tokens": 0, "reward": 1.0}))
+
+    def test_known_failures_map_to_actionable_labels(self):
+        cases = [
+            ({"error": "ApiRateLimitError", "error_message": "429 Too Many Requests"}, "模型限流（429）"),
+            ({"error": "NonZeroAgentExitCodeError", "error_message": "sed: cannot overwrite existing file"},
+             "私有配置写入冲突"),
+            ({"error": "NonZeroAgentExitCodeError", "error_message": "HTTP 400 developer role unsupported"},
+             "请求被端点拒绝（400）"),
+            ({"error": "CancelledError", "error_message": "task group cancelled"}, "被连带取消"),
+            ({"error": "AgentTimeoutError", "error_message": "timed out"}, "运行超时"),
+        ]
+        for trial, label in cases:
+            with self.subTest(label=label):
+                diagnosis = diagnose(trial)
+                self.assertEqual(diagnosis["error_label"], label)
+                self.assertTrue(diagnosis["error_hint"])
+
+
 class IngestTests(ConsoleFixture):
     def test_fixture_job_is_indexed_and_served(self):
         settings = self.make_settings(allow_real_runs=False, real_hbench=True)
@@ -112,6 +136,11 @@ class IngestTests(ConsoleFixture):
         self.assertEqual(listing["combos"], 18)
         trials = client.get(f"/api/jobs/{name}/trials?outcome=error&limit=5").json()
         self.assertTrue(all(t["error"] for t in trials["trials"]))
+        self.assertTrue(all(t["error_label"] == "运行超时" for t in trials["trials"]))
+        missing = client.get(f"/api/jobs/{name}/missing").json()
+        self.assertGreater(missing["total"], 0)
+        self.assertEqual(sum(row["missing"] for row in missing["missing"]), missing["total"])
+        self.assertTrue(all(row["missing"] >= 1 for row in missing["missing"]))
         tasks = client.get(f"/api/jobs/{name}/tasks").json()
         self.assertEqual(len(tasks["combos"]), 6)
         self.assertEqual(len(tasks["tasks"]), 6)
@@ -133,9 +162,13 @@ class IngestTests(ConsoleFixture):
         self.assertEqual(client.get(f"/api/evidence/{name}/../outside").status_code, 404)
         self.assertEqual(client.get(f"/api/evidence/{name}/config.json").status_code, 200)
         trial = client.get(f"/api/jobs/{name}/trials?limit=1").json()["trials"][0]
+        labels = {link["label"] for link in trial["evidence_links"]}
+        self.assertEqual(labels, {"result.json", "trial.log", "agent/native.jsonl"})
         evidence = client.get(f"/api/evidence/{name}/{trial['evidence']}")
         self.assertEqual(evidence.status_code, 200)
         self.assertIn("fixture", evidence.text)
+        self.assertEqual(client.get(f"/api/evidence/{name}/{trial['trial']}/trial.log").status_code, 200)
+        self.assertEqual(client.get(f"/api/evidence/{name}/{trial['trial']}/agent/native.jsonl").status_code, 200)
 
     def test_stale_index_is_pruned_when_job_disappears(self):
         settings = self.make_settings(allow_real_runs=False, real_hbench=True)

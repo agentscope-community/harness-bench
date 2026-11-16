@@ -20,7 +20,7 @@ from .config import REPO_ROOT, Settings
 
 HARNESSES = [("codex", "hbench.agents:FrozenCodex", "0.167.2"),
              ("pi", "hbench.agents:FrozenPi", "1.5.2"),
-             ("agentscope-java", "hbench.agents:AgentScopeJava", "1.3.0")]
+             ("agentscope-java", "hbench.agents:AgentScopeJava", "1.4.0")]
 MODELS = ["fixture-model-a", "fixture-model-b"]
 DATASETS = {"terminal-bench": 0.62, "swe-bench-verified": 0.54, "tau3-bench": 0.70}
 # Per-agent offsets make the heatmap show meaningful differences.
@@ -88,7 +88,11 @@ def build(out: Path, tasks_per_dataset: int, seed: int) -> dict:
                             occurred_at=started + timedelta(seconds=30)) if error else None,
                         started_at=started, finished_at=finished)
                     (folder / "result.json").write_text(trial.model_dump_json(indent=2) + "\n")
+                    (folder / "trial.log").write_text(
+                        f"fixture trial {trial_name}: {agent} / {model} / {task}\n", encoding="utf-8")
                     (folder / "agent").mkdir()
+                    (folder / "agent" / "native.jsonl").write_text(json.dumps({
+                        "fixture": True, "event": "trial", "task": task}) + "\n", encoding="utf-8")
                     (folder / "agent" / "trajectory.json").write_text(json.dumps({
                         "fixture": True, "task": task, "agent": agent, "model": model,
                         "messages": [{"role": "user", "content": "fixture task prompt"},
