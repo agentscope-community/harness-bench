@@ -96,7 +96,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         for cls, version, stdout in (
             (FrozenCodex, CODEX_VERSION, "codex-cli " + CODEX_VERSION),
             (FrozenPi, PI_VERSION, PI_VERSION),
-            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, "agentscope-harness-eval 1.3.0"),
+            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, f"agentscope-harness-eval {AGENTSCOPE_CLI_VERSION}"),
         ):
             with self.subTest(agent=cls.__name__):
                 agent = self.agent(cls)
@@ -118,7 +118,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         for cls, version, stdout in (
             (FrozenCodex, CODEX_VERSION, "codex-cli " + CODEX_VERSION),
             (FrozenPi, PI_VERSION, PI_VERSION),
-            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, "agentscope-harness-eval 1.3.0"),
+            (AgentScopeJava, AGENTSCOPE_CLI_VERSION, f"agentscope-harness-eval {AGENTSCOPE_CLI_VERSION}"),
         ):
             with self.subTest(agent=cls.__name__):
                 self.environment.exec.side_effect = None
@@ -533,8 +533,11 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         env = next(call.kwargs["env"] for call in self.environment.exec.await_args_list if JAVA_CLI in call.kwargs["command"])
         self.assertEqual(env["MODEL_API_KEY"], "dashscope-key")
         self.assertEqual(json.loads(env["EVAL_MODEL_EXTRA_BODY"]), {"enable_thinking": False})
-        self.assertEqual(env["EVAL_MODEL_MAX_TOKENS"], "8192")
-        self.assertEqual(env["EVAL_MODEL_TEMPERATURE"], "0.0")
+        self.assertEqual(env["EVAL_MODEL_MAX_TOKENS"], "16384")
+        self.assertEqual(env["EVAL_MODEL_TEMPERATURE"], "")
+        self.assertNotIn("MAX_TURNS", env)
+        self.assertEqual(env["TURN_TIMEOUT_SECONDS"], "0")
+        self.assertEqual(env["EVAL_DISABLE_MEMORY_HOOKS"], "true")
         self.assertEqual(env["EVAL_MCP_SERVERS"], "[]")
 
     async def test_java_temperature_none_and_empty_extra_body_are_explicit_opt_outs(self):
@@ -729,7 +732,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     def test_java_options_validate_limits_and_unknown_options(self):
         for kwargs in (
             {"max_turns": 0}, {"max_tokens": 0}, {"temperature": -0.1},
-            {"temperature": float("nan")}, {"turn_timeout_seconds": 0},
+            {"temperature": float("nan")}, {"turn_timeout_seconds": -1},
             {"extra_body": []}, {"model_api": "openai-responses"},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -755,7 +758,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
 
     def test_java_native_usage_metadata_and_raw_output_are_preserved(self):
         self.write_native([
-            {"type": "eval.binding", "session_id": "native-session", "profile": "local-project-writable", "tools": ["read"]},
+            {"type": "eval.binding", "session_id": "native-session", "profile": "local-project-writable", "tools": ["read"],
+             "adapter_version": "1.4.0", "identity_prompt_version": "coding-agent-v1", "identity_prompt_sha256": "abc"},
             {"type": "eval.model_end", "id": "a", "usage": {"inputTokens": 100, "outputTokens": 20, "cachedTokens": 30, "cacheCreationTokens": 4, "reasoningTokens": 5}},
             {"type": "MODEL_RESPONSE", "usage": {"inputTokens": 999}},
             {"type": "eval.model_end", "id": "b", "usage": {"inputTokens": 40, "outputTokens": 10, "cachedTokens": 8}},
@@ -768,6 +772,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(context.cost_usd)
         self.assertEqual(context.metadata["native_status"], "completed")
         self.assertEqual(context.metadata["native_binding"]["session_id"], "native-session")
+        self.assertEqual(context.metadata["native_binding"]["adapter_version"], "1.4.0")
+        self.assertEqual(context.metadata["native_binding"]["identity_prompt_sha256"], "abc")
         self.assertEqual(context.metadata["cache_creation_tokens"], 4)
         self.assertEqual(context.metadata["reasoning_tokens"], 5)
         self.assertTrue(context.metadata["existing"])
@@ -784,6 +790,17 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         agent.populate_context_post_run(context)
         agent.populate_context_post_run(context)
         self.assertEqual((context.n_input_tokens, context.n_output_tokens, context.n_cache_tokens), (10, 2, 3))
+
+    def test_java_iteration_limit_is_a_completed_stop_not_a_failure(self):
+        self.write_native([
+            {"type": "eval.iteration_limit", "max_iters": 60},
+            {"type": "eval.completed", "stopReason": "iteration_limit"},
+        ])
+        context = AgentContext()
+        self.agent(AgentScopeJava).populate_context_post_run(context)
+        self.assertEqual(context.metadata["native_status"], "completed")
+        self.assertTrue(context.metadata["iteration_limit"])
+        self.assertNotIn("native_error_type", context.metadata)
 
     def test_java_partial_failed_native_log_keeps_usage_and_failure_metadata(self):
         self.write_native([
@@ -847,6 +864,21 @@ class RuntimeDockerfileTests(unittest.TestCase):
             self.assertIn(f"`pi-mcp-adapter` `{PI_MCP_ADAPTER_VERSION}`", readme)
             self.assertIn("Node >=22.19.0", readme)
             self.assertIn("`>=1.0.0,<2.0.0`", readme)
+
+    def test_harness_profiles_share_no_step_cap_and_no_temperature(self):
+        profiles = {
+            name: yaml.safe_load((ROOT / f"configs/harnesses/{name}.yaml").read_text())["kwargs"]
+            for name in ("agentscope-java", "pi", "codex")
+        }
+        for name, kwargs in profiles.items():
+            with self.subTest(harness=name):
+                self.assertNotIn("max_turns", kwargs)
+                self.assertNotIn("temperature", kwargs)
+        self.assertEqual(profiles["pi"]["reasoning_effort"], "off")
+        self.assertEqual(profiles["codex"]["reasoning_effort"], "none")
+        self.assertFalse(profiles["agentscope-java"]["extra_body"]["enable_thinking"])
+        self.assertEqual(profiles["agentscope-java"]["turn_timeout_seconds"], 0)
+        self.assertTrue(profiles["agentscope-java"]["disable_memory_hooks"])
 
     def test_runtime_installs_version_checks_and_labels_match_frozen_versions(self):
         dockerfile = (ROOT / "environments/hbench/Dockerfile.runtime").read_text()

@@ -78,7 +78,7 @@ class FrozenPi(ScenarioMixin, Pi):
 
 
 class AgentScopeOptions(InstalledAgentOptions):
-    max_turns: int = Field(default=60, ge=1)
+    max_turns: int | None = Field(default=None, ge=1)
 
 
 class AgentScope(ScenarioMixin, BaseInstalledAgent):
@@ -109,13 +109,15 @@ class AgentScope(ScenarioMixin, BaseInstalledAgent):
         if not connection.api_key:
             raise ValueError("AgentScope requires a model API key")
         env = {"MODEL_ID": self._parsed_model_name, "MODEL_BASE_URL": self._execution_base_url,
-               "DASHSCOPE_API_KEY": connection.api_key, "MAX_TURNS": str(self.options.max_turns),
+               "DASHSCOPE_API_KEY": connection.api_key,
                "EVAL_SESSION_ID": self.eval_session_id,
                "EVAL_USER_ID": "eval-" + self.logs_dir.name,
                "EVAL_SYSTEM_PROMPT": self.eval_spec.get("system_context", ""),
                "EVAL_SKILLS_DIR": SKILL_REGISTRY if self.eval_spec.get('skills_paths') else '',
                "TURN_TIMEOUT_SECONDS": str(self.eval_spec.get('turn_timeout_seconds', 600)),
                "EVAL_STATE_DIR": str(self.environment_logs_dir / "workspace-state")}
+        if self.options.max_turns is not None:
+            env["MAX_TURNS"] = str(self.options.max_turns)
         for key, value in self.eval_spec.get("java", {}).items():
             env["EVAL_" + key.upper()] = str(value).lower()
         command = "java -Xmx2048m -cp '/opt/harness/classes:/opt/harness/dependency/*' io.agentscope.examples.eval.HarnessEvalCli "

@@ -39,13 +39,13 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && test -f /tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts \
     && test "$(node -p "require('/opt/pi-mcp-adapter/node_modules/pi-mcp-adapter/package.json').version")" = '7.0.1' \
     && test "$(java -cp '/opt/harness/classes:/opt/harness/dependency/*' \
-        io.agentscope.examples.eval.HarnessEvalCli --version)" = 'agentscope-harness-eval 1.3.0' \
+        io.agentscope.examples.eval.HarnessEvalCli --version)" = 'agentscope-harness-eval 1.4.0' \
     && npm cache clean --force
 
 LABEL org.harness-bench.codex.version="0.167.2" \
       org.harness-bench.pi.version="1.5.2" \
       org.harness-bench.pi-mcp-adapter.version="7.0.1" \
-      org.harness-bench.agentscope-cli.version="1.3.0"
+      org.harness-bench.agentscope-cli.version="1.4.0"
 
 # Runtime mounts retain /usr/local/lib/node_modules, /opt/pi-mcp-adapter,
 # /opt/java/openjdk, /opt/harness and the /usr/local/bin tool paths.

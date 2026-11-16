@@ -3,4 +3,4 @@ import_path: hbench.agents:FrozenCodex
 supported_api_formats: [openai_responses]
 kwargs:
   version: 0.167.2
-  reasoning_effort: medium
+  reasoning_effort: "none"

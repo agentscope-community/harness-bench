@@ -27,7 +27,7 @@ PI_MCP_ADAPTER_VERSION = "7.0.1"
 PI_MCP_VERSIONS = SpecifierSet(">=1.0.0,<2.0.0")
 PI_MCP_EXTENSION = "/tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts"
 PI_MCP_CONFIG = "/tmp/harbor-pi-agent/mcp.json"
-AGENTSCOPE_CLI_VERSION = "1.3.0"
+AGENTSCOPE_CLI_VERSION = "1.4.0"
 JAVA_CLI = (
     "java -cp '/opt/harness/classes:/opt/harness/dependency/*' "
     "io.agentscope.examples.eval.HarnessEvalCli"
@@ -176,15 +176,25 @@ class AgentScopeJavaOptions(InstalledAgentOptions):
         default=AGENTSCOPE_CLI_VERSION, pattern=_VERSION_PATTERN,
         description="Exact CLI version to check against the baked Java adapter; never installs packages.",
     )
-    max_turns: int = Field(default=60, ge=1)
-    temperature: float | None = Field(default=0.0, ge=0, le=2, allow_inf_nan=False)
-    max_tokens: int = Field(default=8192, ge=1)
+    max_turns: int | None = Field(
+        default=None, ge=1,
+        description="Optional step cap. None leaves the Harbor trial timeout as the only limit.",
+    )
+    temperature: float | None = Field(default=None, ge=0, le=2, allow_inf_nan=False)
+    max_tokens: int = Field(default=16384, ge=1)
     context_window_tokens: int = Field(
         default=0, ge=0,
         description="Reported model context window in tokens; 0 infers it from the model name.",
     )
     extra_body: dict = Field(default_factory=lambda: {"enable_thinking": False})
-    turn_timeout_seconds: int = Field(default=600, ge=1)
+    turn_timeout_seconds: int = Field(
+        default=0, ge=0,
+        description="Inner event-stream deadline per input. 0 relies on the Harbor trial timeout.",
+    )
+    disable_memory_hooks: bool = Field(
+        default=True,
+        description="Turn off flush/consolidation; Pi and Codex have no equivalent pipeline.",
+    )
     system_prompt: str = ""
 
 
@@ -288,7 +298,6 @@ class AgentScopeJava(BaseInstalledAgent):
             "MODEL_API_KEY": connection.api_key,
             "MODEL_ID": self._parsed_model_name,
             "MODEL_BASE_URL": connection.execution_base_url,
-            "MAX_TURNS": str(self.options.max_turns),
             "EVAL_SESSION_ID": session_id,
             "EVAL_USER_ID": session_id,
             "EVAL_STATE_DIR": str(self.environment_logs_dir / "workspace-state"),
@@ -300,7 +309,12 @@ class AgentScopeJava(BaseInstalledAgent):
                 "" if self.options.temperature is None else str(self.options.temperature)
             ),
             "TURN_TIMEOUT_SECONDS": str(self.options.turn_timeout_seconds),
+            "EVAL_DISABLE_MEMORY_HOOKS": (
+                "true" if self.options.disable_memory_hooks else "false"
+            ),
         }
+        if self.options.max_turns is not None:
+            env["MAX_TURNS"] = str(self.options.max_turns)
         if self.options.context_window_tokens:
             env["EVAL_MODEL_CONTEXT_WINDOW"] = str(self.options.context_window_tokens)
         command = JAVA_CLI + " " + shlex.join([remote_request, native, workdir])
@@ -374,9 +388,14 @@ class AgentScopeJava(BaseInstalledAgent):
                     if kind == "eval.binding":
                         metadata["native_binding"] = {
                             key: event[key] for key in (
-                                "session_id", "profile", "candidate_sha", "candidate_source_sha256", "tools"
+                                "session_id", "profile", "candidate_sha",
+                                "candidate_source_sha256", "tools",
+                                "adapter_version", "identity_prompt_version",
+                                "identity_prompt_sha256",
                             ) if key in event
                         }
+                    elif kind == "eval.iteration_limit":
+                        metadata["iteration_limit"] = True
                     elif kind in ("eval.completed", "eval.failed"):
                         metadata["native_status"] = kind.removeprefix("eval.")
                         if kind == "eval.failed":

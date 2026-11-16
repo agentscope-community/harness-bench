@@ -44,7 +44,7 @@ def validate_inputs(root, config, definitions_only=False):
     if 'dataset_root' in config:
         raise ValueError('Legacy dataset_root is not supported; use canonical task IDs')
     source = (root / 'adapters/agentscope-java/src/main/java/io/agentscope/examples/eval/HarnessEvalCli.java').read_text()
-    java_version = re.search(r'agentscope-harness-eval ([\d.]+)', source)[1]
+    java_version = re.search(r'ADAPTER_VERSION\s*=\s*"([\d.]+)"', source)[1]
     docker = (root / 'environments/Dockerfile.sandbox').read_text()
     versions = {'agentscope': java_version}
     for name in ('codex', 'pi'):

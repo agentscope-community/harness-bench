@@ -47,6 +47,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -60,12 +62,22 @@ import reactor.core.publisher.Flux;
 /** Runs the production Harness with its workspace tools; records native evidence for the adapter. */
 public final class HarnessEvalCli {
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String ADAPTER_VERSION = "1.4.0";
+    private static final String IDENTITY_PROMPT_VERSION = "coding-agent-v1";
+    // Harness is a general framework and ships no root role prompt. Evaluation treats all
+    // three harnesses as terminal coding agents, so the adapter supplies only that product
+    // configuration; it contains no task, benchmark, or dataset material.
+    static final String IDENTITY_PROMPT =
+            "You are a coding agent working in a terminal workspace. "
+                    + "Inspect files, run commands, and modify code to complete the user's task. "
+                    + "Work only through the function tools provided in each request; "
+                    + "run command-line programs with the execute tool.";
 
     private HarnessEvalCli() {}
 
     public static void main(String[] args) throws IOException {
         if (args.length == 1 && args[0].equals("--version")) {
-            System.out.println("agentscope-harness-eval 1.3.0");
+            System.out.println("agentscope-harness-eval " + ADAPTER_VERSION);
             return;
         }
         if (args.length != 3) {
@@ -107,7 +119,7 @@ public final class HarnessEvalCli {
                                                 .toString()));
         String apiKey = System.getenv("MODEL_API_KEY");
         if (apiKey == null || apiKey.isBlank()) apiKey = System.getenv("DASHSCOPE_API_KEY");
-        // Defaults keep the historical behaviour; the Harbor adapter sets all three explicitly.
+        // Defaults keep the historical behaviour; the Harbor adapter overrides them per run.
         Map<String, Object> extraBody =
                 JSON.readValue(
                         System.getenv()
@@ -119,8 +131,8 @@ public final class HarnessEvalCli {
                         .maxTokens(
                                 Integer.parseInt(
                                         System.getenv()
-                                                .getOrDefault("EVAL_MODEL_MAX_TOKENS", "8192")));
-        String temperature = System.getenv().getOrDefault("EVAL_MODEL_TEMPERATURE", "0.0");
+                                                .getOrDefault("EVAL_MODEL_MAX_TOKENS", "16384")));
+        String temperature = System.getenv().getOrDefault("EVAL_MODEL_TEMPERATURE", "");
         if (!temperature.isBlank()) options.temperature(Double.parseDouble(temperature));
         if (!extraBody.isEmpty()) options.additionalBodyParams(extraBody);
         var modelBuilder =
@@ -139,6 +151,7 @@ public final class HarnessEvalCli {
         var model = modelBuilder.build();
         Toolkit toolkit = mcpToolkit(System.getenv("EVAL_MCP_SERVERS"));
         AtomicBoolean exceeded = new AtomicBoolean();
+        int maxIters = configuredMaxIters();
         boolean iterationLimited = false;
         boolean failed = false;
         try (BufferedWriter output =
@@ -174,9 +187,7 @@ public final class HarnessEvalCli {
                                     new LocalFilesystemSpec()
                                             .project(workspace)
                                             .projectWritable(true))
-                            .maxIters(
-                                    Integer.parseInt(
-                                            System.getenv().getOrDefault("MAX_TURNS", "60")))
+                            .maxIters(maxIters)
                             // Unattended evaluation has no user to confirm HITL prompts.
                             // Without this, any ASK-gated tool (e.g. tau3's
                             // start_conversation) stops the run instead of executing it.
@@ -184,10 +195,13 @@ public final class HarnessEvalCli {
                                     PermissionContextState.builder()
                                             .mode(PermissionMode.BYPASS)
                                             .build());
-            String systemPrompt = System.getenv("EVAL_SYSTEM_PROMPT");
-            if (systemPrompt != null && !systemPrompt.isBlank()) {
-                builder.sysPrompt(systemPrompt);
-            }
+            String systemContext = System.getenv("EVAL_SYSTEM_PROMPT");
+            // Always set the identity prompt; a supplied system context is appended, never
+            // substituted, matching Pi's --append-system-prompt semantics.
+            builder.sysPrompt(
+                    systemContext == null || systemContext.isBlank()
+                            ? IDENTITY_PROMPT
+                            : IDENTITY_PROMPT + "\n\n" + systemContext);
             String skillsDir = System.getenv("EVAL_SKILLS_DIR");
             if (skillsDir != null && !skillsDir.isBlank()) {
                 builder.projectGlobalSkillsDir(Path.of(skillsDir));
@@ -222,23 +236,21 @@ public final class HarnessEvalCli {
             }
             HarnessAgent agent = builder.build();
             try {
-                write(
-                        output,
-                        Map.of(
-                                "type",
-                                "eval.binding",
-                                "createdAt",
-                                Instant.now().toString(),
-                                "session_id",
-                                sessionId,
-                                "candidate_sha",
-                                System.getenv().getOrDefault("CANDIDATE_SHA", "unknown"),
-                                "candidate_source_sha256",
-                                System.getenv().getOrDefault("CANDIDATE_SOURCE_SHA256", "unknown"),
-                                "tools",
-                                agent.getToolkit().getToolNames(),
-                                "profile",
-                                "local-project-writable"));
+                Map<String, Object> binding = new LinkedHashMap<>();
+                binding.put("type", "eval.binding");
+                binding.put("createdAt", Instant.now().toString());
+                binding.put("session_id", sessionId);
+                binding.put(
+                        "candidate_sha", System.getenv().getOrDefault("CANDIDATE_SHA", "unknown"));
+                binding.put(
+                        "candidate_source_sha256",
+                        System.getenv().getOrDefault("CANDIDATE_SOURCE_SHA256", "unknown"));
+                binding.put("tools", agent.getToolkit().getToolNames());
+                binding.put("profile", "local-project-writable");
+                binding.put("adapter_version", ADAPTER_VERSION);
+                binding.put("identity_prompt_version", IDENTITY_PROMPT_VERSION);
+                binding.put("identity_prompt_sha256", sha256(IDENTITY_PROMPT));
+                write(output, binding);
                 for (JsonNode input : events) {
                     StringBuilder text = new StringBuilder();
                     for (JsonNode block : input.path("content")) {
@@ -256,23 +268,28 @@ public final class HarnessEvalCli {
                                     Instant.now().toString(),
                                     "content",
                                     input.path("content")));
-                    agent.streamEvents(
-                                    text.toString(),
-                                    RuntimeContext.builder()
-                                            .sessionId(sessionId)
-                                            .userId(
-                                                    System.getenv()
-                                                            .getOrDefault(
-                                                                    "EVAL_USER_ID", sessionId))
-                                            .build())
-                            .doOnNext(event -> record(output, event, exceeded))
-                            .blockLast(
-                                    Duration.ofSeconds(
-                                            Long.parseLong(
-                                                    System.getenv()
-                                                            .getOrDefault(
-                                                                    "TURN_TIMEOUT_SECONDS",
-                                                                    "600"))));
+                    var stream =
+                            agent.streamEvents(
+                                            text.toString(),
+                                            RuntimeContext.builder()
+                                                    .sessionId(sessionId)
+                                                    .userId(
+                                                            System.getenv()
+                                                                    .getOrDefault(
+                                                                            "EVAL_USER_ID",
+                                                                            sessionId))
+                                                    .build())
+                                    .doOnNext(event -> record(output, event, exceeded));
+                    long timeoutSeconds =
+                            Long.parseLong(
+                                    System.getenv().getOrDefault("TURN_TIMEOUT_SECONDS", "0"));
+                    // Zero means the Harbor trial budget is the only deadline. A positive
+                    // value bounds one input's whole event stream (all iterations).
+                    if (timeoutSeconds > 0) {
+                        stream.blockLast(Duration.ofSeconds(timeoutSeconds));
+                    } else {
+                        stream.blockLast();
+                    }
                     write(
                             output,
                             Map.of(
@@ -287,6 +304,15 @@ public final class HarnessEvalCli {
                         // harnesses stop at their turn limit and let the verifier score the
                         // workspace. Exiting 1 here erased trials whose work was complete.
                         iterationLimited = true;
+                        write(
+                                output,
+                                Map.of(
+                                        "type",
+                                        "eval.iteration_limit",
+                                        "createdAt",
+                                        Instant.now().toString(),
+                                        "max_iters",
+                                        maxIters));
                         break;
                     }
                 }
@@ -380,8 +406,32 @@ public final class HarnessEvalCli {
     }
 
     private static void record(BufferedWriter output, AgentEvent event, AtomicBoolean exceeded) {
-        if (event.getType() == AgentEventType.EXCEED_MAX_ITERS) exceeded.set(true);
+        // Forwarded subagent events carry a slash-separated source path. A subagent's cap is
+        // part of that subagent's own result; only the root agent's cap ends this input.
+        if (event.getType() == AgentEventType.EXCEED_MAX_ITERS && event.getSource() == null) {
+            exceeded.set(true);
+        }
         write(output, event);
+    }
+
+    /** Absent MAX_TURNS relies on the Harbor trial budget; an explicit value is validated. */
+    private static int configuredMaxIters() {
+        String configured = System.getenv("MAX_TURNS");
+        if (configured == null || configured.isBlank()) return Integer.MAX_VALUE;
+        return Integer.parseInt(configured);
+    }
+
+    private static String sha256(String value) {
+        try {
+            byte[] digest =
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder(digest.length * 2);
+            for (byte b : digest) hex.append(String.format("%02x", b));
+            return hex.toString();
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
     }
 
     private static Model observe(Model delegate, BufferedWriter output) {
