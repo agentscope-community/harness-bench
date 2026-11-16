@@ -22,6 +22,24 @@ def _timestamp(path: Path) -> float:
         return 0.0
 
 
+def _job_evidence_mtime(job_dir: Path) -> float:
+    """Return the mtime of the newest evidence file inside a job directory.
+
+    This reflects when the job was actually last modified by a trial, rather
+    than when the console last re-indexed it.
+    """
+    candidates = [
+        job_dir / "result.json",
+        job_dir / "config.json",
+        job_dir / "lock.json",
+        job_dir / "fixture.json",
+    ]
+    candidates.extend(job_dir.glob("*/result.json"))
+    mtimes = [_timestamp(p) for p in candidates]
+    newest = max(mtimes) if mtimes else 0.0
+    return newest if newest > 0 else _timestamp(job_dir)
+
+
 HARNESS_NAMES = {"hbench.agents:FrozenCodex": "codex", "hbench.agents:FrozenPi": "pi",
                  "hbench.agents:AgentScopeJava": "agentscope-java"}
 
@@ -283,10 +301,7 @@ class Ingestor:
             return True
         if any("diagnostics" not in trial for trial in summary.get("trials", [])):
             return True
-        newest = max([_timestamp(job_dir / "result.json"), _timestamp(job_dir / "config.json"),
-                      _timestamp(job_dir / "lock.json")]
-                     + [_timestamp(path) for path in job_dir.glob("*/result.json")])
-        return newest > _timestamp(summary_path)
+        return _job_evidence_mtime(job_dir) > _timestamp(summary_path)
 
     def _summarize(self, job_dir: Path, report: Path):
         self.settings.tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -350,7 +365,9 @@ class Ingestor:
             "path": str(job_dir),
             "origin": "run" if self.database.has_run(name) else "import",
             "fixture": (job_dir / "fixture.json").is_file(),
-            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "updated_at": datetime.fromtimestamp(
+                _job_evidence_mtime(job_dir), timezone.utc
+            ).isoformat(timespec="seconds"),
             "recorded_trials": summary.get("recorded_trials"),
             "planned_trials": summary.get("planned_trials"),
             "pass_rate_planned": summary.get("pass_rate_planned"),
