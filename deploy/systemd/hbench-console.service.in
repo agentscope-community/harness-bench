@@ -1,0 +1,25 @@
+[Unit]
+Description=Harness evaluation console
+Documentation=file://@CODE_DIR@/docs/console-plan.md
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+# The console shells out to `hbench run`, which talks to the host Docker socket.
+SupplementaryGroups=docker
+WorkingDirectory=@CODE_DIR@
+# Sourced (not EnvironmentFile) so shell-style defaults such as
+# HB_TAU_API_KEY="${HB_BAILIAN_API_KEY}" work like they do in run-matrix.sh.
+ExecStart=/bin/bash -c 'set -a; . /etc/harness-bench/console.env; . /etc/harness-bench/runtime-image.env 2>/dev/null || true; set +a; exec @CODE_DIR@/.venv/bin/python -m hbench_console'
+Restart=on-failure
+RestartSec=5
+# A stop mid-run leaves the run marked interrupted; `harbor jobs resume` can continue it.
+TimeoutStopSec=90
+# Do not add PrivateTmp/ProtectSystem/ProtectHome: hbench hands host paths to the
+# Docker daemon, and the daemon cannot see a private mount namespace.
+
+[Install]
+WantedBy=multi-user.target

@@ -52,7 +52,7 @@ class Settings:
             allow_real_runs=_flag("CONSOLE_ALLOW_REAL_RUNS"),
             hbench_cmd=argv,
             viewer_url=(env.get("CONSOLE_VIEWER_URL") or "").strip() or None,
-            host=(env.get("CONSOLE_HOST") or "127.0.0.1").strip(),
+            host=(env.get("CONSOLE_HOST") or "0.0.0.0").strip(),
             port=port,
             sync_on_start=not _flag("CONSOLE_SKIP_STARTUP_SYNC"),
         )

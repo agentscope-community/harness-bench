@@ -124,14 +124,15 @@ queued → planning → running → summarizing → archiving → succeeded
 - 证据接口做目录包含校验，拒绝 `.env*`、`*.pem`、`*.key`、`id_rsa*`、`auth.json`。
 - API 错误信息不回显矩阵明文之外的凭证引用值；矩阵合同不包含密钥。
 - 真实运行需要 `CONSOLE_ALLOW_REAL_RUNS=1`；UI 默认演练模式。
-- 控制台只绑定内网地址；对外由反向代理加鉴权。
+- 默认监听 `0.0.0.0:8090`；Console 自身没有鉴权，必须用安全组/防火墙限制来源，
+  公网访问须经反向代理加鉴权。
 - 演示/测试数据只写入被忽略的 `artifacts/`。
 
 ## 10. 环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `CONSOLE_HOST` / `CONSOLE_PORT` | `127.0.0.1` / `8090` | 监听地址 |
+| `CONSOLE_HOST` / `CONSOLE_PORT` | `0.0.0.0` / `8090` | 监听地址；默认对所有网卡开放，可用 `CONSOLE_HOST=127.0.0.1` 收回本机 |
 | `CONSOLE_DATA_DIR` | `artifacts/console` | SQLite 与日志 |
 | `CONSOLE_JOBS_ROOT` | `artifacts/jobs` | 证据扫描目录（可指向 OSS 镜像） |
 | `CONSOLE_REPORTS_ROOT` | `artifacts/reports` | summary 缓存 |
@@ -180,6 +181,10 @@ P0 与 P1 已实现并离线验证：
 
 ## 13. 部署
 
-同机 ECS 上用 systemd 或 docker compose 运行 `python -m hbench_console`，只监听内网端口；
+同机 ECS 上用 systemd 运行 `python -m hbench_console`，默认监听 `0.0.0.0:8090`：安全组只放行
+内网/办公网来源，公网入口由 ALB 或反向代理加鉴权；Aone 负责跑测试、
+构建 runtime 镜像和触发发布，运行体保持"独占 ECS + 宿主 Docker"。具体脚本、目录约定和
+回滚步骤见 [deploy/aone/README.md](../deploy/aone/README.md)。
+
 `harbor view artifacts/jobs --jobs --host 127.0.0.1 --port 8091` 作为只读轨迹服务，
 反向代理把 `/trace` 指过去并屏蔽 `/api/run*`、`/api/jobs/*/upload`、`/api/jobs/*/summarize`。
