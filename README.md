@@ -24,9 +24,11 @@ Each of the 941 tasks runs once with each model and harness pairing, for a total
 | --- | --- | --- |
 | Codex | `0.167.2` | `openai_responses` only |
 | Pi | `1.5.2` | `openai_chat_completions`, `openai_responses`, `anthropic_messages` |
-| AgentScope Java | `1.4.0` | `openai_chat_completions` only |
+| AgentScope Java | `1.5.0` | `openai_chat_completions` only |
 
 Pi requires Node >=22.19.0 and uses the external `pi-mcp-adapter` `7.0.1` (Pi compatibility range `>=1.0.0,<2.0.0`).
+
+Codex and Pi inherit Harbor’s official adapters, retaining only version freezing, preinstalled runtime checks and necessary endpoint/MCP compatibility. Execution delegates to the official adapters without extra prompts, retries, correction or compaction policies. The AgentScope Java adapter binds the `2.1.0-SNAPSHOT` kernel and records configuration and native failure facts without replacing its solving loop.
 
 ## Architecture
 
@@ -71,6 +73,8 @@ It indexes `artifacts/jobs/` (or an OSS mirror directory) through `hbench summar
 pass rates by harness × model × dataset plus per-task and per-trial detail. Real runs are off by
 default; credentials are read from the console process environment and never stored. See the
 [console execution document](docs/console-plan.md).
+
+Diagnostics separately show Harbor exceptions, native stop reasons, tool failures and log/trajectory links without changing rewards or pass rates. Missing token or tool statistics remain unknown, not zero; partial token totals include missing-trial counts. Declared settings and adapter-native bindings are shown separately, neither constituting provider-confirmed parameter parity. Raw evidence stays local; Console links return redacted text copies (32 MiB preview limit per file). When the SDK cannot distinguish an absent usage field from zero, it is shown as unknown.
 
 ## Repository layout
 

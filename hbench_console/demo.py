@@ -20,7 +20,7 @@ from .config import REPO_ROOT, Settings
 
 HARNESSES = [("codex", "hbench.agents:FrozenCodex", "0.167.2"),
              ("pi", "hbench.agents:FrozenPi", "1.5.2"),
-             ("agentscope-java", "hbench.agents:AgentScopeJava", "1.4.0")]
+             ("agentscope-java", "hbench.agents:AgentScopeJava", "1.5.0")]
 MODELS = ["fixture-model-a", "fixture-model-b"]
 DATASETS = {"terminal-bench": 0.62, "swe-bench-verified": 0.54, "tau3-bench": 0.70}
 # Per-agent offsets make the heatmap show meaningful differences.

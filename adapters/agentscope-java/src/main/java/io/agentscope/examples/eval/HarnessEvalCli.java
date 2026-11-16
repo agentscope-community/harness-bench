@@ -21,7 +21,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.AgentEventType;
+import io.agentscope.core.event.ToolResultEndEvent;
+import io.agentscope.core.journal.AtomicThreadJournal;
+import io.agentscope.core.journal.ThreadJournalStore;
 import io.agentscope.core.message.Msg;
+import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.model.ChatResponse;
 import io.agentscope.core.model.ChatUsage;
 import io.agentscope.core.model.GenerateOptions;
@@ -33,16 +37,17 @@ import io.agentscope.core.state.JsonFileAgentStateStore;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientBuilder;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
+import io.agentscope.core.tool.search.ToolSearchMode;
 import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.context.ContextPolicy;
 import io.agentscope.harness.agent.context.ContextTokenEstimator;
 import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
+import io.agentscope.harness.agent.journal.LocalJournalStorage;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.tools.ToolsConfig;
 import java.io.BufferedWriter;
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -62,7 +67,7 @@ import reactor.core.publisher.Flux;
 /** Runs the production Harness with its workspace tools; records native evidence for the adapter. */
 public final class HarnessEvalCli {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String ADAPTER_VERSION = "1.4.0";
+    private static final String ADAPTER_VERSION = "1.5.0";
     private static final String IDENTITY_PROMPT_VERSION = "coding-agent-v1";
     // Harness is a general framework and ships no root role prompt. Evaluation treats all
     // three harnesses as terminal coding agents, so the adapter supplies only that product
@@ -75,7 +80,41 @@ public final class HarnessEvalCli {
 
     private HarnessEvalCli() {}
 
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) {
+        try {
+            run(args);
+        } catch (Exception error) {
+            // Setup/cleanup can fail outside the stream. Never print request-bearing messages.
+            if (args.length == 3) {
+                try (BufferedWriter output =
+                        Files.newBufferedWriter(
+                                Path.of(args[1]),
+                                StandardCharsets.UTF_8,
+                                StandardOpenOption.CREATE,
+                                StandardOpenOption.APPEND)) {
+                    write(
+                            output,
+                            Map.of(
+                                    "type",
+                                    "eval.failed",
+                                    "createdAt",
+                                    Instant.now().toString(),
+                                    "error_type",
+                                    error.getClass().getSimpleName(),
+                                    "phase",
+                                    "adapter_setup_or_cleanup"));
+                } catch (Exception evidenceError) {
+                    System.err.println(
+                            "Could not record adapter failure: "
+                                    + evidenceError.getClass().getSimpleName());
+                }
+            }
+            System.err.println("Harness evaluation failed: " + error.getClass().getSimpleName());
+            System.exit(1);
+        }
+    }
+
+    private static void run(String[] args) throws IOException {
         if (args.length == 1 && args[0].equals("--version")) {
             System.out.println("agentscope-harness-eval " + ADAPTER_VERSION);
             return;
@@ -122,16 +161,12 @@ public final class HarnessEvalCli {
         // Defaults keep the historical behaviour; the Harbor adapter overrides them per run.
         Map<String, Object> extraBody =
                 JSON.readValue(
-                        System.getenv()
-                                .getOrDefault(
-                                        "EVAL_MODEL_EXTRA_BODY", "{\"enable_thinking\":false}"),
+                        env(
+                                "EVAL_MODEL_EXTRA_BODY_SECRET",
+                                env("EVAL_MODEL_EXTRA_BODY", "{\"enable_thinking\":false}")),
                         new TypeReference<Map<String, Object>>() {});
-        GenerateOptions.Builder options =
-                GenerateOptions.builder()
-                        .maxTokens(
-                                Integer.parseInt(
-                                        System.getenv()
-                                                .getOrDefault("EVAL_MODEL_MAX_TOKENS", "16384")));
+        int maxTokens = Integer.parseInt(env("EVAL_MODEL_MAX_TOKENS", "16384"));
+        GenerateOptions.Builder options = GenerateOptions.builder().maxTokens(maxTokens);
         String temperature = System.getenv().getOrDefault("EVAL_MODEL_TEMPERATURE", "");
         if (!temperature.isBlank()) options.temperature(Double.parseDouble(temperature));
         if (!extraBody.isEmpty()) options.additionalBodyParams(extraBody);
@@ -142,15 +177,24 @@ public final class HarnessEvalCli {
                         .modelName(System.getenv("MODEL_ID"))
                         .stream(true)
                         .generateOptions(options.build());
-        // Unknown Bailian model names infer no window; the harness then falls back to
-        // 64000 input tokens while compaction triggers on a different fallback. Reporting
-        // the real window keeps both thresholds consistent and avoids false budget stops.
+        // An explicit window overrides name inference. The observer below must pass it
+        // through unchanged so native compaction and budget checks use the same capacity.
         int contextWindowTokens =
                 Integer.parseInt(System.getenv().getOrDefault("EVAL_MODEL_CONTEXT_WINDOW", "0"));
         if (contextWindowTokens > 0) modelBuilder.contextWindowSize(contextWindowTokens);
         var model = modelBuilder.build();
         Toolkit toolkit = mcpToolkit(System.getenv("EVAL_MCP_SERVERS"));
+        // Kernel defaults are evaluated as shipped; the switches exist for A/B runs and for
+        // reproducing results recorded with the 1.4 adapter.
+        boolean journalEnabled = Boolean.parseBoolean(env("EVAL_JOURNAL_ENABLED", "true"));
+        boolean repeatedFailureGuard =
+                !Boolean.parseBoolean(env("EVAL_DISABLE_REPEATED_FAILURE_GUARD", "false"));
+        boolean toolResultEviction =
+                !Boolean.parseBoolean(env("EVAL_DISABLE_TOOL_RESULT_EVICTION", "false"));
+        String readFileMaxChars = env("EVAL_READ_FILE_MAX_CHARS", "");
+        String configuredTurns = env("MAX_TURNS", "");
         AtomicBoolean exceeded = new AtomicBoolean();
+        ToolFailureStats toolFailures = new ToolFailureStats();
         int maxIters = configuredMaxIters();
         boolean iterationLimited = false;
         boolean failed = false;
@@ -160,6 +204,14 @@ public final class HarnessEvalCli {
                         StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE,
                         StandardOpenOption.APPEND)) {
+            // Journaling is the 2.1 session path. Keep its files under the evidence state
+            // directory: the workspace default writes into the task workspace, which the
+            // verifier scores and diffs.
+            Path journalRoot = state.resolve("journal");
+            ThreadJournalStore journalStore =
+                    (key, context) ->
+                            new AtomicThreadJournal(
+                                    new LocalJournalStorage(journalRoot), key.storagePath());
             var builder =
                     HarnessAgent.builder()
                             .name("HarnessAgent")
@@ -167,6 +219,7 @@ public final class HarnessEvalCli {
                             .toolkit(toolkit)
                             .workspace(state)
                             .stateStore(new JsonFileAgentStateStore(state.resolve("sessions")))
+                            .journalEnabled(journalEnabled)
                             .contextPolicy(
                                     new ContextPolicy(
                                             0,
@@ -195,6 +248,12 @@ public final class HarnessEvalCli {
                                     PermissionContextState.builder()
                                             .mode(PermissionMode.BYPASS)
                                             .build());
+            if (journalEnabled) builder.threadJournalStore(journalStore);
+            if (!repeatedFailureGuard) builder.disableRepeatedFailureGuard();
+            if (!toolResultEviction) builder.disableToolResultEviction();
+            if (!readFileMaxChars.isBlank()) {
+                builder.readFileMaxChars(Integer.parseInt(readFileMaxChars));
+            }
             String systemContext = System.getenv("EVAL_SYSTEM_PROMPT");
             // Always set the identity prompt; a supplied system context is appended, never
             // substituted, matching Pi's --append-system-prompt semantics.
@@ -248,8 +307,25 @@ public final class HarnessEvalCli {
                 binding.put("tools", agent.getToolkit().getToolNames());
                 binding.put("profile", "local-project-writable");
                 binding.put("adapter_version", ADAPTER_VERSION);
+                binding.put("harness_version", packageVersion(HarnessAgent.class));
                 binding.put("identity_prompt_version", IDENTITY_PROMPT_VERSION);
                 binding.put("identity_prompt_sha256", sha256(IDENTITY_PROMPT));
+                binding.put("journal_enabled", journalEnabled);
+                binding.put("repeated_failure_guard", repeatedFailureGuard);
+                binding.put("tool_result_eviction", toolResultEviction);
+                binding.put("read_file_max_chars", readFileMaxChars);
+                binding.put("max_turns", configuredTurns);
+                binding.put("max_iters", maxIters);
+                binding.put("context_window_tokens", model.getContextWindowSize());
+                binding.put("max_tokens", maxTokens);
+                binding.put(
+                        "temperature",
+                        temperature.isBlank() ? null : Double.parseDouble(temperature));
+                Object thinking = extraBody.get("enable_thinking");
+                if (thinking instanceof Boolean) binding.put("enable_thinking", thinking);
+                binding.put(
+                        "disable_memory_hooks",
+                        Boolean.parseBoolean(env("EVAL_DISABLE_MEMORY_HOOKS", "false")));
                 write(output, binding);
                 for (JsonNode input : events) {
                     StringBuilder text = new StringBuilder();
@@ -279,7 +355,8 @@ public final class HarnessEvalCli {
                                                                             "EVAL_USER_ID",
                                                                             sessionId))
                                                     .build())
-                                    .doOnNext(event -> record(output, event, exceeded));
+                                    .doOnNext(
+                                            event -> record(output, event, exceeded, toolFailures));
                     long timeoutSeconds =
                             Long.parseLong(
                                     System.getenv().getOrDefault("TURN_TIMEOUT_SECONDS", "0"));
@@ -320,20 +397,17 @@ public final class HarnessEvalCli {
                 completed.put("type", "eval.completed");
                 completed.put("createdAt", Instant.now().toString());
                 if (iterationLimited) completed.put("stopReason", "iteration_limit");
+                completed.put("tool_failures", toolFailures.summary());
                 write(output, completed);
             } catch (Exception error) {
                 // Provider exceptions can contain request details; retain only their class here.
-                write(
-                        output,
-                        Map.of(
-                                "type",
-                                "eval.failed",
-                                "createdAt",
-                                Instant.now().toString(),
-                                "error_type",
-                                error.getClass().getSimpleName(),
-                                "iteration_limit",
-                                exceeded.get()));
+                Map<String, Object> failure = new LinkedHashMap<>();
+                failure.put("type", "eval.failed");
+                failure.put("createdAt", Instant.now().toString());
+                failure.put("error_type", error.getClass().getSimpleName());
+                failure.put("iteration_limit", exceeded.get());
+                failure.put("tool_failures", toolFailures.summary());
+                write(output, failure);
                 System.err.println(
                         "Harness evaluation failed: " + error.getClass().getSimpleName());
                 failed = true;
@@ -405,13 +479,67 @@ public final class HarnessEvalCli {
         }
     }
 
-    private static void record(BufferedWriter output, AgentEvent event, AtomicBoolean exceeded) {
+    private static void record(
+            BufferedWriter output,
+            AgentEvent event,
+            AtomicBoolean exceeded,
+            ToolFailureStats failures) {
         // Forwarded subagent events carry a slash-separated source path. A subagent's cap is
         // part of that subagent's own result; only the root agent's cap ends this input.
         if (event.getType() == AgentEventType.EXCEED_MAX_ITERS && event.getSource() == null) {
             exceeded.set(true);
         }
+        if (event instanceof ToolResultEndEvent result) {
+            Map<String, Object> metadata = result.getMetadata();
+            Object kind =
+                    metadata == null ? null : metadata.get(ToolResultBlock.METADATA_ERROR_KIND);
+            if (kind instanceof String value && !value.isBlank()) {
+                failures.record(value);
+                Map<String, Object> failure = new LinkedHashMap<>();
+                failure.put("type", "eval.tool_failure");
+                failure.put("createdAt", event.getCreatedAt());
+                failure.put("tool", result.getToolCallName());
+                failure.put("error_kind", value);
+                Object scope = metadata.get(ToolResultBlock.METADATA_ERROR_SCOPE);
+                if (scope instanceof String text && !text.isBlank()) {
+                    failure.put("error_scope", text);
+                }
+                Object retriable = metadata.get(ToolResultBlock.METADATA_RETRIABLE);
+                if (retriable instanceof Boolean flag) failure.put("retriable", flag);
+                if (event.getSource() != null) failure.put("source", event.getSource());
+                write(output, failure);
+            }
+        }
         write(output, event);
+    }
+
+    /** Counts machine-readable tool failures so one trial row can show the dominant cause. */
+    static final class ToolFailureStats {
+        private final Map<String, Integer> byKind = new LinkedHashMap<>();
+        private int total;
+
+        void record(String kind) {
+            total++;
+            byKind.merge(kind, 1, Integer::sum);
+        }
+
+        Map<String, Object> summary() {
+            Map<String, Object> summary = new LinkedHashMap<>();
+            summary.put("total", total);
+            summary.put("by_kind", new LinkedHashMap<>(byKind));
+            return summary;
+        }
+    }
+
+    private static String env(String name, String fallback) {
+        String value = System.getenv(name);
+        return value == null ? fallback : value;
+    }
+
+    private static String packageVersion(Class<?> type) {
+        Package owner = type.getPackage();
+        String version = owner == null ? null : owner.getImplementationVersion();
+        return version == null || version.isBlank() ? "unknown" : version;
     }
 
     /** Absent MAX_TURNS relies on the Harbor trial budget; an explicit value is validated. */
@@ -434,11 +562,51 @@ public final class HarnessEvalCli {
         }
     }
 
-    private static Model observe(Model delegate, BufferedWriter output) {
+    /** SDK primitive zero also means absent upstream data; do not claim a measured zero. */
+    static Map<String, Object> observedUsage(ChatUsage usage) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("inputTokens", usage.getInputTokens() > 0 ? usage.getInputTokens() : null);
+        values.put("outputTokens", usage.getOutputTokens() > 0 ? usage.getOutputTokens() : null);
+        values.put("cachedTokens", usage.getCachedTokens() > 0 ? usage.getCachedTokens() : null);
+        values.put(
+                "cacheCreationTokens",
+                usage.getCacheCreationTokens() > 0 ? usage.getCacheCreationTokens() : null);
+        values.put(
+                "reasoningTokens",
+                usage.getReasoningTokens() > 0 ? usage.getReasoningTokens() : null);
+        return values;
+    }
+
+    static Model observe(Model delegate, BufferedWriter output) {
         return new Model() {
             @Override
             public String getModelName() {
                 return delegate.getModelName();
+            }
+
+            @Override
+            public int getContextWindowSize() {
+                return delegate.getContextWindowSize();
+            }
+
+            @Override
+            public ToolSearchMode getToolSearchMode() {
+                return delegate.getToolSearchMode();
+            }
+
+            @Override
+            public boolean supportsNativeStructuredOutput() {
+                return delegate.supportsNativeStructuredOutput();
+            }
+
+            @Override
+            public boolean supportsNativeStructuredOutputWithTools() {
+                return delegate.supportsNativeStructuredOutputWithTools();
+            }
+
+            @Override
+            public boolean supportsToolChoiceSpecific() {
+                return delegate.supportsToolChoiceSpecific();
             }
 
             @Override
@@ -481,7 +649,8 @@ public final class HarnessEvalCli {
                                                                     "usage",
                                                                     usage.get() == null
                                                                             ? Map.of()
-                                                                            : usage.get())))
+                                                                            : observedUsage(
+                                                                                    usage.get()))))
                                     .doOnError(
                                             error ->
                                                     write(
@@ -507,7 +676,9 @@ public final class HarnessEvalCli {
             output.newLine();
             output.flush();
         } catch (IOException error) {
-            throw new UncheckedIOException(error);
+            // Evidence is a side path; a write failure must not interrupt native reasoning.
+            System.err.println(
+                    "Could not write native evidence: " + error.getClass().getSimpleName());
         }
     }
 }

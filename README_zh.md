@@ -24,9 +24,11 @@
 | --- | --- | --- |
 | Codex | `0.167.2` | 仅 `openai_responses` |
 | Pi | `1.5.2` | `openai_chat_completions`、`openai_responses`、`anthropic_messages` |
-| AgentScope Java | `1.4.0` | 仅 `openai_chat_completions` |
+| AgentScope Java | `1.5.0` | 仅 `openai_chat_completions` |
 
 Pi 要求 Node >=22.19.0，使用外部 `pi-mcp-adapter` `7.0.1`（Pi 兼容范围 `>=1.0.0,<2.0.0`）。
+
+Codex、Pi 继承 Harbor 官方适配器，仅保留版本冻结、预装检查和必要的端点/MCP 兼容；执行仍委托官方适配器，不增加提示词、重试、修正或压缩策略。AgentScope Java 适配器对接 `2.1.0-SNAPSHOT` 内核，记录参数绑定和原生失败事实，不另写解题循环。
 
 ## 运行架构
 
@@ -70,6 +72,8 @@ CONSOLE_ALLOW_REAL_RUNS=1 python -m hbench_console   # 同时允许发起付费�
 控制台扫描 `artifacts/jobs/`（可指向 OSS 同步下来的镜像目录），调用 `hbench summary` 建索引，
 按 harness × model × dataset 展示通过率和逐题明细。真实运行默认关闭；凭证只从控制台进程的
 环境变量读取，不落库。设计与接口见 [评测控制台执行文档](docs/console-plan.md)。
+
+诊断单独展示 Harbor 异常、原生停止原因、工具失败事实及日志/轨迹链接，不改变 reward 或通过率。缺失 token 和工具统计显示为未知，不当作 0；部分 token 汇总标注缺失 trial 数。配置声明与适配器原生绑定分别展示，均不等于服务端已确认参数一致。原始证据留在本机，Console 链接返回脱敏文本副本（单文件预览上限 32 MiB）。SDK 无法区分字段缺失与零值时，按未知展示。
 
 ## 目录结构
 

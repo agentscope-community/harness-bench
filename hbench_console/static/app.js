@@ -184,6 +184,11 @@ async function renderJobs() {
 
 function comboTable(combos) {
   const cell = v => h("td", { class: "num", text: v });
+  const tokens = (combo, field) => {
+    const missing = combo[field + "_missing"];
+    if (combo[field] === null || combo[field] === undefined) return "未知";
+    return `${num(combo[field])}${missing ? `（已记录小计，缺 ${missing} 题）` : ""}`;
+  };
   return h("div", { class: "table-wrap" },
     h("table", {},
       h("thead", {}, h("tr", {},
@@ -195,7 +200,7 @@ function comboTable(combos) {
         cell(c.planned), cell(c.recorded), cell(c.missing), cell(c.errors), cell(c.unscored),
         cell(c.passed), cell(pct(c.pass_rate_planned)), cell(pct(c.pass_rate_recorded)),
         cell(c.mean_reward_scored === null ? "—" : Number(c.mean_reward_scored).toFixed(3)),
-        cell(num(c.input_tokens)), cell(num(c.output_tokens)))))));
+        cell(tokens(c, "input_tokens")), cell(tokens(c, "output_tokens")))))));
 }
 
 function evidenceLinks(job, trial) {
@@ -214,13 +219,29 @@ function evidenceLinks(job, trial) {
 }
 
 function diagnosisCell(trial) {
-  if (!trial.error && !trial.error_label) return h("span", { class: "muted", text: "" });
+  const diagnostics = trial.diagnostics || {};
+  const failures = diagnostics.tool_failures;
+  const details = h("details", {}, h("summary", { text: "参数与原生证据" }),
+    h("p", { class: "muted", text: "配置来自 result.json；未声明的值沿用原生默认，不代表已核验一致。原生 binding 是适配器配置证据，不是服务端确认。" }),
+    h("pre", { text: JSON.stringify(diagnostics.configured || {}, null, 2) }),
+    (diagnostics.steps || []).map(step => h("div", {},
+      h("strong", { text: `步骤 ${step.step}` }),
+      h("pre", { text: JSON.stringify(step, null, 2) }))));
   return h("div", {},
-    trial.error ? h("strong", { text: trial.error }) : h("strong", { text: trial.error_label }),
+    trial.error || trial.error_label ? h("strong", { text: trial.error || trial.error_label }) : null,
     trial.error && trial.error_label && trial.error_label !== trial.error
       ? h("div", { text: trial.error_label }) : null,
     trial.error_message ? h("div", { text: trial.error_message, title: trial.error_message }) : null,
-    trial.error_hint ? h("div", { class: "muted", text: `处置：${trial.error_hint}` }) : null);
+    trial.error_hint ? h("div", { class: "muted", text: `处置：${trial.error_hint}` }) : null,
+    trial.native_label ? h("div", { text: trial.native_label }) : null,
+    trial.native_hint ? h("div", { class: "muted", text: trial.native_hint }) : null,
+    failures ? h("div", { text: trial.tool_failure_label || `工具调用失败 ${failures.total} 次（仅已报告步骤）` })
+      : h("div", { class: "muted", text: "未提供结构化工具失败统计（不是 0 次）" }),
+    failures && failures.reported_steps < failures.total_steps
+      ? h("div", { class: "muted", text: `仅 ${failures.reported_steps}/${failures.total_steps} 步有工具统计，不能跨 harness 比较次数` }) : null,
+    trial.tool_failure_hint ? h("div", { class: "muted", text: trial.tool_failure_hint }) : null,
+    trial.usage_hint ? h("div", { class: "muted", text: trial.usage_hint }) : null,
+    details);
 }
 
 function trialsCard(job) {
@@ -254,7 +275,6 @@ function trialsCard(job) {
       const rows = data.trials.map(t => {
         const outcome = t.error ? badge(t.error_label || "错误", "bad")
           : t.reward === 1 ? badge("通过", "ok")
-          : t.error_label ? badge(t.error_label, "warn")
           : t.reward === null || t.reward === undefined ? badge("未评分", "warn")
           : badge("失败", "bad");
         return h("tr", {},
@@ -264,13 +284,13 @@ function trialsCard(job) {
           h("td", {}, outcome),
           h("td", { class: "num", text: t.reward === null || t.reward === undefined ? "—" : String(t.reward) }),
           h("td", { class: "num", text: t.duration_sec === null || t.duration_sec === undefined ? "—" : `${t.duration_sec}s` }),
-          h("td", { class: "num", text: `${num(t.input_tokens)} / ${num(t.output_tokens)}` }),
+          h("td", { class: "num", text: `${t.input_tokens === null ? "未知" : num(t.input_tokens)} / ${t.output_tokens === null ? "未知" : num(t.output_tokens)}` }),
           h("td", {}, evidenceLinks(job, t)),
           h("td", { class: "muted" }, diagnosisCell(t)));
       });
       results.replaceChildren(h("div", { class: "table-wrap" },
         h("table", {},
-          h("thead", {}, h("tr", {}, ["任务", "Trial", "Harness", "Model", "Dataset", "结果", "Reward", "耗时", "Token 入/出", "证据", "错误"].map(x => h("th", { text: x })))),
+          h("thead", {}, h("tr", {}, ["任务", "Trial", "Harness", "Model", "Dataset", "结果", "Reward", "耗时", "Token 入/出", "证据", "诊断（不影响评分）"].map(x => h("th", { text: x })))),
           h("tbody", {}, rows))));
       const start = data.total ? filter.offset + 1 : 0;
       const end = Math.min(filter.offset + filter.limit, data.total);

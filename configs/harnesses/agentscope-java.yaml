@@ -2,7 +2,7 @@ name: agentscope-java
 import_path: hbench.agents:AgentScopeJava
 supported_api_formats: [openai_chat_completions]
 kwargs:
-  version: 1.4.0
+  version: 1.5.0
   # Pi defaults to 16384 for custom endpoints; keep the same ceiling.
   max_tokens: 16384
   # No step cap and no inner stream deadline: the Harbor trial timeout is the
@@ -10,9 +10,16 @@ kwargs:
   turn_timeout_seconds: 0
   # Pi and Codex have no always-on memory extraction pipeline.
   disable_memory_hooks: true
-  # Bailian model IDs are unknown to AgentScope, which then assumes a 64k input
-  # window while compaction uses a 160k fallback. Both matrix models accept at
-  # least 128k, so report that explicitly. 0 would fall back to name inference.
+  # 2.1 journals live under the evidence state dir; they never enter the
+  # scored workspace.
+  journal_enabled: true
+  # Kernel defaults: one reminder when the model repeats an identical failing
+  # tool call, and eviction of oversized tool results before the next request.
+  repeated_failure_guard: true
+  tool_result_eviction: true
+  # Conservative evaluation setting, not a verified provider limit. A declared
+  # window wins over name inference/LearnedContextWindows. Keep this setting
+  # unchanged until the actual model limits are verified; record it in evidence.
   context_window_tokens: 131072
   # No temperature: use the server default like Pi and Codex.
   extra_body:

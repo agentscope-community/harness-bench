@@ -109,6 +109,83 @@ class SummaryTests(unittest.TestCase):
         self.assertIn('.table-scroll{overflow-x:auto}', page)
         self.assertIn('<div class="table-scroll"><table>', page)
 
+    def test_usage_unknown_is_not_zero_and_group_totals_report_coverage(self):
+        known = self.trial(1)
+        unknown = self.trial(2)
+        unknown["agent_result"] = {"n_input_tokens": None, "n_output_tokens": 0}
+        self.job_result([known, unknown], 2)
+        summary = self.summarize()
+        row = summary["trials"][1]
+        self.assertIsNone(row["input_tokens"])
+        self.assertEqual(row["output_tokens"], 0)
+        self.assertFalse(row["diagnostics"]["usage"]["input_tokens_known"])
+        self.assertTrue(row["diagnostics"]["usage"]["output_tokens_known"])
+        group = summary["groups"][0]
+        self.assertEqual((group["input_tokens"], group["input_tokens_missing"]), (7, 1))
+        self.assertEqual((group["output_tokens"], group["output_tokens_missing"]), (3, 0))
+        self.assertEqual((group["passed"], group["errors"]), (2, 0))
+
+    def test_native_partial_usage_is_not_a_complete_total(self):
+        raw = self.trial()
+        raw["agent_result"]["metadata"] = {"native_usage_missing_fields": ["outputTokens"]}
+        self.job_result([raw], 1)
+        summary = self.summarize()
+        self.assertEqual(summary["trials"][0]["input_tokens"], 7)
+        self.assertIsNone(summary["trials"][0]["output_tokens"])
+        self.assertIsNone(summary["groups"][0]["output_tokens"])
+        self.assertEqual(summary["groups"][0]["output_tokens_missing"], 1)
+
+    def test_multi_step_usage_avoids_double_counting_and_preserves_step_diagnostics(self):
+        raw = self.trial()
+        raw["step_results"] = [
+            {"step_name": "a", "agent_result": {"n_input_tokens": 2, "n_output_tokens": 1,
+             "metadata": {"native_status": "completed", "tool_failure_summary": {"total": 0, "by_kind": {}}}}},
+            {"step_name": "b", "agent_result": {"n_input_tokens": 4, "n_output_tokens": 2}},
+        ]
+        self.job_result([raw], 1)
+        summary = self.summarize()
+        row = summary["trials"][0]
+        self.assertEqual((row["input_tokens"], row["output_tokens"]), (6, 3))
+        self.assertEqual(summary["groups"][0]["input_tokens"], 6)
+        failures = row["diagnostics"]["tool_failures"]
+        self.assertEqual((failures["total"], failures["reported_steps"], failures["total_steps"]), (0, 1, 2))
+
+    def test_diagnostics_do_not_change_rewards_or_export_private_configuration(self):
+        raw = self.trial(agent="agentscope-java")
+        raw["config"]["agent"]["kwargs"] = {
+            "max_tokens": 16384, "extra_body": {"enable_thinking": False, "opaque": "body-private"},
+            "system_prompt": "private-system", "headers": {"Authorization": "header-private"},
+        }
+        raw["config"]["agent"]["env"] = {"MODEL_API_KEY": "key-private"}
+        raw["agent_result"]["metadata"] = {
+            "native_status": "failed", "native_error_type": "Broken", "private": "meta-private",
+            "native_binding": {"max_tokens": 16384, "temperature": None, "enable_thinking": False,
+                               "opaque": "binding-private"},
+            "tool_failures": {"total": 2, "by_tool_kind": {"execute": {"command_failed": 2}}},
+            "tool_failure_summary": {"total": 2, "by_kind": {"command_failed": 2}},
+        }
+        self.job_result([raw], 1)
+        before = (self.job / "result.json").read_bytes()
+        summary = self.summarize()
+        row = summary["trials"][0]
+        self.assertIsNone(row["error"])
+        self.assertEqual(summary["groups"][0]["passed"], 1)
+        self.assertEqual(summary["groups"][0]["errors"], 0)
+        self.assertEqual(row["diagnostics"]["configured"], {"max_tokens": 16384, "enable_thinking": False})
+        self.assertEqual(row["diagnostics"]["tool_failures"]["total"], 2)
+        step = row["diagnostics"]["steps"][0]
+        self.assertEqual(step["native_status"], "failed")
+        self.assertEqual(step["tool_failures"]["by_tool_kind"], {"execute": {"command_failed": 2}})
+        for secret in ("key-private", "body-private", "header-private", "private-system", "meta-private", "binding-private"):
+            self.assertNotIn(secret, json.dumps(summary))
+        self.assertEqual((self.job / "result.json").read_bytes(), before)
+
+    def test_unreported_tool_statistics_are_unknown_not_zero(self):
+        self.job_result([self.trial()], 1)
+        diagnostics = self.summarize()["trials"][0]["diagnostics"]
+        self.assertIsNone(diagnostics["tool_failures"])
+        self.assertEqual(diagnostics["steps"], [])
+
     def test_trial_rows_report_error_and_duration(self):
         raw = self.trial(reward=None)
         raw.update(started_at="2026-11-12T00:00:00Z", finished_at="2026-11-12T00:01:30.5Z",

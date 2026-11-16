@@ -1,5 +1,6 @@
 """Scan Harbor job directories, summarize them with hbench and index the result."""
 from datetime import datetime, timezone
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,8 @@ import shutil
 import subprocess
 import threading
 import uuid
+
+from hbench.summary import DIAGNOSTICS_VERSION
 
 from .config import Settings
 from .db import Database, now
@@ -107,14 +110,107 @@ def _missing_trials(job_dir: Path, summary: dict) -> list[dict]:
             for (dataset, task, agent, model), count in sorted(remaining.items()) if count > 0]
 
 
-def _evidence_links(job_dir: Path, trial: str) -> list[dict]:
-    candidates = (("result.json", f"{trial}/result.json"), ("trial.log", f"{trial}/trial.log"),
-                  ("agent/native.jsonl", f"{trial}/agent/native.jsonl"))
-    links = [{"label": label, "path": path} for label, path in candidates
-             if (job_dir / path).is_file()]
+def _evidence_name(name) -> bool:
+    return (isinstance(name, str) and bool(name.strip()) and name != "."
+            and not any(part in name for part in ("..", "/", "\\", "\x00")))
+
+
+def _evidence_confined(path: Path, boundary: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(boundary)
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _evidence_trial_dir(job_dir: Path, trial: str) -> Path | None:
+    if not _evidence_name(trial):
+        return None
+    try:
+        base = job_dir.resolve() / trial
+    except (OSError, ValueError, RuntimeError):
+        return None
+    # Keep the lexical trial boundary: a symlink to a sibling trial is not evidence.
+    return base if _evidence_confined(base, base) else None
+
+
+def _read_evidence_result(path: Path, boundary: Path) -> dict | None:
+    if not _evidence_confined(path, boundary):
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _recorded_step_names(job_dir: Path, row: dict, job_result: dict | None) -> list[str]:
+    base = _evidence_trial_dir(job_dir, row["trial"])
+    if base is None:
+        return []
+    raw = _read_evidence_result(base / "result.json", base)
+    steps = raw.get("step_results") if raw is not None else None
+    if not isinstance(steps, list):
+        embedded = (job_result or {}).get("trial_results")
+        if isinstance(embedded, list):
+            current = next((item for item in embedded if isinstance(item, dict)
+                            and item.get("trial_name") == row["trial"]), {})
+            steps = current.get("step_results")
+    if not isinstance(steps, list):
+        diagnostics = row.get("diagnostics")
+        steps = diagnostics.get("steps") if isinstance(diagnostics, dict) else None
+    if not isinstance(steps, list):
+        return []
+    # An explicit empty raw list stays empty; never invent names from step indices.
+    return list(dict.fromkeys(step["step_name"] for step in steps
+                              if isinstance(step, dict) and _evidence_name(step.get("step_name"))))
+
+
+def _evidence_links(job_dir: Path, trial: str, step_names: list[str] | tuple[str, ...] = ()) -> list[dict]:
+    trial_dir = _evidence_trial_dir(job_dir, trial)
+    if trial_dir is None:
+        return []
+    root = trial_dir.parent
+    links = []
+
+    def add_file(path: Path):
+        if not _evidence_confined(path, trial_dir):
+            return
+        try:
+            if path.is_file():
+                links.append({"label": path.relative_to(trial_dir).as_posix(),
+                              "path": path.relative_to(root).as_posix()})
+        except (OSError, ValueError, RuntimeError):
+            pass
+
+    for name in ("result.json", "trial.log"):
+        add_file(trial_dir / name)
+    agents = [trial_dir / "agent"]
+    agents.extend(trial_dir / "steps" / name / "agent"
+                  for name in dict.fromkeys(name for name in step_names if _evidence_name(name)))
+    for agent in agents:
+        if not _evidence_confined(agent, trial_dir):
+            continue
+        for filename in ("native.jsonl", "codex.txt", "pi.txt", "trajectory.json"):
+            add_file(agent / filename)
+        # Preserve the bounded native-session scan, only beneath recorded steps.
+        for directory in ("sessions", "pi/sessions"):
+            base = agent / directory
+            if not _evidence_confined(base, trial_dir):
+                continue
+            try:
+                for path in sorted(islice(base.rglob("*.jsonl"), 20)):
+                    add_file(path)
+            except (OSError, ValueError, RuntimeError):
+                # Evidence discovery is diagnostic only and must not block indexing.
+                continue
     # Embedded trials only have the job-level copy of result.json.
-    if not (job_dir / f"{trial}/result.json").is_file() and (job_dir / "result.json").is_file():
-        links.insert(0, {"label": "result.json (job)", "path": "result.json"})
+    if not any(link["label"] == "result.json" for link in links):
+        path = root / "result.json"
+        try:
+            if _evidence_confined(path, root) and path.is_file():
+                links.insert(0, {"label": "result.json (job)", "path": "result.json"})
+        except (OSError, ValueError, RuntimeError):
+            pass
     return links
 
 
@@ -182,8 +278,10 @@ class Ingestor:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return True
-        # Reports generated before diagnostics existed lack this key.
-        if any("error_message" not in trial for trial in summary.get("trials", [])):
+        # Regenerate old reports even when result timestamps did not change.
+        if summary.get("diagnostics_version") != DIAGNOSTICS_VERSION:
+            return True
+        if any("diagnostics" not in trial for trial in summary.get("trials", [])):
             return True
         newest = max([_timestamp(job_dir / "result.json"), _timestamp(job_dir / "config.json"),
                       _timestamp(job_dir / "lock.json")]
@@ -223,20 +321,27 @@ class Ingestor:
                 "pass_rate_planned": group.get("pass_rate_planned"),
                 "pass_rate_recorded": group.get("pass_rate_recorded"),
                 "mean_reward_scored": group.get("mean_reward_scored"),
-                "input_tokens": group.get("input_tokens") or 0,
-                "output_tokens": group.get("output_tokens") or 0,
+                "input_tokens": group.get("input_tokens"),
+                "output_tokens": group.get("output_tokens"),
+                "input_tokens_missing": group.get("input_tokens_missing"),
+                "output_tokens_missing": group.get("output_tokens_missing"),
             })
         trials = []
+        try:
+            job_result = _read_evidence_result(job_dir / "result.json", job_dir.resolve())
+        except (OSError, ValueError, RuntimeError):
+            job_result = None
         for row in summary.get("trials", []):
-            links = _evidence_links(job_dir, row["trial"])
+            links = _evidence_links(job_dir, row["trial"], _recorded_step_names(job_dir, row, job_result))
             trials.append({
                 "trial": row["trial"], "task": row.get("task"),
                 "agent": row.get("agent"), "model": row.get("model"),
                 "dataset": row.get("dataset"), "reward": row.get("reward"),
                 "error": row.get("error"), "error_message": row.get("error_message"),
                 "duration_sec": row.get("duration_sec"),
-                "input_tokens": row.get("input_tokens") or 0,
-                "output_tokens": row.get("output_tokens") or 0,
+                "input_tokens": row.get("input_tokens"),
+                "output_tokens": row.get("output_tokens"),
+                "diagnostics": json.dumps(row.get("diagnostics") or {}, ensure_ascii=False),
                 "evidence": links[0]["path"] if links else None,
                 "evidence_links": json.dumps(links, ensure_ascii=False) if links else None,
             })

@@ -15,10 +15,103 @@ def _count(value, label):
     return value
 
 
+DIAGNOSTICS_VERSION = 1
+
+
 def _contexts(row):
-    if row.get("agent_result"):
-        return [row["agent_result"]]
-    return [s.get("agent_result") or {} for s in row.get("step_results") or []]
+    # Multi-step jobs use each step's context; never add a root aggregate twice.
+    if row.get("step_results"):
+        return [s.get("agent_result") or {} for s in row["step_results"]]
+    return [row.get("agent_result") or {}]
+
+
+def _tokens(contexts, key):
+    native_key = {"n_input_tokens": "inputTokens", "n_output_tokens": "outputTokens"}.get(key)
+    for context in contexts:
+        metadata = context.get("metadata") or {}
+        if isinstance(metadata, dict):
+            missing = metadata.get("native_usage_missing_fields") or []
+            if metadata.get("native_parse_errors") or (isinstance(missing, list) and native_key in missing):
+                return None
+    values = [context.get(key) for context in contexts]
+    if not values or any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in values):
+        return None
+    return sum(values)
+
+
+def _safe_fields(value, keys):
+    """Only expose scalar diagnostic fields, never arbitrary env/body/metadata."""
+    if not isinstance(value, dict):
+        return {}
+    return {key: value[key] for key in keys if key in value
+            and (value[key] is None or isinstance(value[key], (str, bool, int, float)))}
+
+
+def _diagnostics(row, contexts):
+    config = (row.get("config") or {}).get("agent") or {}
+    kwargs = config.get("kwargs") or {}
+    configured = _safe_fields(kwargs, (
+        "version", "reasoning_effort", "max_tokens", "context_window_tokens", "temperature",
+        "max_turns", "turn_timeout_seconds", "disable_memory_hooks", "journal_enabled",
+        "repeated_failure_guard", "tool_result_eviction", "read_file_max_chars",
+    ))
+    body = kwargs.get("extra_body")
+    if isinstance(body, dict) and isinstance(body.get("enable_thinking"), bool):
+        configured["enable_thinking"] = body["enable_thinking"]
+    result = {"configured": configured, "configured_source": "result.config.agent.kwargs", "steps": [],
+              "usage": {"input_tokens_known": _tokens(contexts, "n_input_tokens") is not None,
+                        "output_tokens_known": _tokens(contexts, "n_output_tokens") is not None}}
+    failures = {"total": 0, "by_kind": {}, "reported_steps": 0, "total_steps": len(contexts)}
+    for index, context in enumerate(contexts):
+        metadata = context.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            continue
+        step = _safe_fields(metadata, (
+            "native_status", "native_error_type", "iteration_limit", "native_log_preserved",
+            "native_parse_errors", "atif_supported",
+        ))
+        binding = _safe_fields(metadata.get("native_binding"), (
+            "adapter_version", "harness_version", "candidate_sha", "candidate_source_sha256",
+            "identity_prompt_version", "identity_prompt_sha256", "journal_enabled",
+            "repeated_failure_guard", "tool_result_eviction", "read_file_max_chars",
+            "max_turns", "max_iters", "context_window_tokens", "max_tokens", "temperature",
+            "enable_thinking", "disable_memory_hooks",
+        ))
+        if binding:
+            step["native_binding"] = binding
+        # Prefer the terminal summary over incremental events, without counting both.
+        summary = metadata.get("tool_failure_summary") or metadata.get("tool_failures")
+        if isinstance(summary, dict):
+            total = summary.get("total")
+            if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+                step["tool_failures"] = {"total": total}
+                failures["reported_steps"] += 1
+                failures["total"] += total
+                detailed = metadata.get("tool_failures") or {}
+                by_tool = detailed.get("by_tool_kind") if isinstance(detailed, dict) else None
+                derived = {}
+                if isinstance(by_tool, dict):
+                    clean = {}
+                    for tool, values in by_tool.items():
+                        if not isinstance(tool, str) or not isinstance(values, dict):
+                            continue
+                        clean[tool] = {k: v for k, v in values.items() if isinstance(k, str)
+                                       and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+                        for kind, count in clean[tool].items():
+                            derived[kind] = derived.get(kind, 0) + count
+                    step["tool_failures"]["by_tool_kind"] = clean
+                by_kind = summary.get("by_kind", derived)
+                if isinstance(by_kind, dict):
+                    kinds = {k: v for k, v in by_kind.items() if isinstance(k, str)
+                             and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
+                    step["tool_failures"]["by_kind"] = kinds
+                    for kind, count in kinds.items():
+                        failures["by_kind"][kind] = failures["by_kind"].get(kind, 0) + count
+        if step:
+            result["steps"].append({"step": index + 1, "source": "agent_result.metadata", **step})
+    # No metadata is unknown, not evidence of zero failures (e.g. official Codex/Pi).
+    result["tool_failures"] = failures if failures["reported_steps"] else None
+    return result
 
 
 def _link(path, output):
@@ -61,8 +154,9 @@ def _trial_rows(rows, evidence):
                        "reward": ((row.get("verifier_result") or {}).get("rewards") or {}).get("reward"),
                        "error": error, "error_message": _error_message(recorded),
                        "duration_sec": duration,
-                       "input_tokens": sum(c.get("n_input_tokens") or 0 for c in contexts),
-                       "output_tokens": sum(c.get("n_output_tokens") or 0 for c in contexts),
+                       "input_tokens": _tokens(contexts, "n_input_tokens"),
+                       "output_tokens": _tokens(contexts, "n_output_tokens"),
+                       "diagnostics": _diagnostics(row, contexts),
                        "evidence": evidence[identifier]})
     return result
 
@@ -83,7 +177,8 @@ def aggregate(rows, planned=None, *, expected=None):
         elif planned is not None and known > planned:
             raise ValueError("Planned group counts exceed the planned trial count")
     groups = defaultdict(lambda: {"recorded": 0, "errors": 0, "scored": 0, "passed": 0,
-                                  "reward_sum": 0.0, "input_tokens": 0, "output_tokens": 0})
+                                  "reward_sum": 0.0, "input_tokens": 0, "output_tokens": 0,
+                                  "input_tokens_missing": 0, "output_tokens_missing": 0})
     for key in expected or {}:
         groups[key]
     seen = set()
@@ -107,9 +202,12 @@ def aggregate(rows, planned=None, *, expected=None):
             group["passed"] += reward == 1
             group["reward_sum"] += reward
         contexts = _contexts(row)
-        for context in contexts:
-            group["input_tokens"] += context.get("n_input_tokens") or 0
-            group["output_tokens"] += context.get("n_output_tokens") or 0
+        for field in ("input_tokens", "output_tokens"):
+            value = _tokens(contexts, "n_" + field)
+            if value is None:
+                group[field + "_missing"] += 1
+            else:
+                group[field] += value
     result = []
     for (agent, model, dataset), group in sorted(groups.items()):
         count = expected[(agent, model, dataset)] if expected is not None else None
@@ -121,6 +219,9 @@ def aggregate(rows, planned=None, *, expected=None):
                      mean_reward_scored=group["reward_sum"] / group["scored"] if group["scored"] else None,
                      pass_rate_recorded=group["passed"] / group["recorded"] if group["recorded"] else None,
                      pass_rate_planned=group["passed"] / count if count else None)
+        for field in ("input_tokens", "output_tokens"):
+            if not group["recorded"] or group[field + "_missing"] == group["recorded"]:
+                group[field] = None
         result.append(group)
     total = len(rows)
     if planned is not None and total > planned:
@@ -251,6 +352,7 @@ def summarize_job(folder, output):
         raise ValueError("No Harbor job or trial results found in the selected directory")
     summary = aggregate(list(rows.values()), planned, expected=expected)
     summary["trials"] = _trial_rows(rows, evidence)
+    summary["diagnostics_version"] = DIAGNOSTICS_VERSION
     planned = summary["planned_trials"]
     output.mkdir(parents=True, exist_ok=False)
     (output / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

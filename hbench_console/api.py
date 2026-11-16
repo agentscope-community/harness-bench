@@ -11,7 +11,7 @@ import threading
 import uuid
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import yaml
@@ -26,6 +26,100 @@ from .runner import NAME, Runner
 MATRIX_KEYS = {"name", "cluster", "dataset_root", "benchmarks", "models", "harnesses",
                "concurrency", "attempts", "selection", "image_map"}
 OVERRIDE_KEYS = {"cluster", "concurrency", "attempts", "n_tasks", "tasks", "exclude_gpu"}
+EVIDENCE_LIMIT = 32 * 1024 * 1024
+PRIVATE_FIELDS = {"env", "extra_env", "headers", "extra_headers", "extra_body", "auth", "credentials", "token", "cookie", "cookies"}
+SECRET_FIELD = re.compile(r"(?:api[_-]?key|access[_-]?key(?:[_-]?(?:id|secret))?|password|passwd|secret|authorization|access[_-]?token|refresh[_-]?token|private[_-]?key)$", re.I)
+
+
+def _redact_evidence_text(text, secrets):
+    for secret in sorted(secrets, key=len, reverse=True):
+        text = text.replace(secret, "[REDACTED]")
+    text = re.sub(r"(?i)\bBearer\s+[^\s\"',;}]+", "Bearer [REDACTED]", text)
+    text = re.sub(r"(?i)(\bauthorization[\"']?\s*[=:]\s*[\"']?)[^\r\n\"']+", r"\1[REDACTED]", text)
+    return re.sub(r"(?i)((?:api[_-]?key|password|secret|access[_-]?token)[\"']?\s*[=:]\s*[\"']?)[^\s\"',;}]+", r"\1[REDACTED]", text)
+
+
+def _redact_evidence(value, secrets):
+    """Redact a response copy; raw local evidence is never rewritten."""
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if isinstance(key, str) and (key.lower() in PRIVATE_FIELDS or SECRET_FIELD.search(key)):
+                def collect(item, explicit=False):
+                    # Generic env/body values include flags such as "1". They must
+                    # not be globally substituted into counters or unrelated text.
+                    if isinstance(item, str) and item and (explicit or len(item) >= 4):
+                        secrets.add(item)
+                    elif isinstance(item, dict):
+                        for name, nested in item.items():
+                            collect(nested, explicit or bool(SECRET_FIELD.search(str(name))))
+                    elif isinstance(item, list):
+                        for nested in item:
+                            collect(nested, explicit)
+                collect(item, bool(SECRET_FIELD.search(key)))
+                result[key] = "[REDACTED]"
+            else:
+                result[key] = _redact_evidence(item, secrets)
+        return result
+    if isinstance(value, list):
+        return [_redact_evidence(item, secrets) for item in value]
+    if isinstance(value, str):
+        return _redact_evidence_text(value, secrets)
+    return value
+
+
+def _public_evidence(target, root):
+    if target.suffix.lower() not in {".json", ".jsonl", ".log", ".txt", ".yaml", ".yml"}:
+        raise HTTPException(403, "仅提供脱敏文本证据；其他原始文件请在本机查看")
+    if target.stat().st_size > EVIDENCE_LIMIT:
+        raise HTTPException(413, "证据超过脱敏预览上限，请在本机查看原始文件")
+    text = target.read_text(encoding="utf-8", errors="replace")
+    secrets = {value for key, value in os.environ.items() if value and SECRET_FIELD.search(key)}
+    # Credentials may appear in a log as well as the nearby recorded configuration.
+    sources = {root / "config.json", root / "lock.json", target}
+    for parent in (target.parent, *target.parents):
+        if not parent.is_relative_to(root):
+            break
+        candidate = parent / "result.json"
+        if candidate.is_file():
+            sources.add(candidate)
+            break
+    for source in sources:
+        if not source.is_file() or not source.resolve().is_relative_to(root):
+            continue
+        if source.stat().st_size > EVIDENCE_LIMIT:
+            raise HTTPException(413, "配置超过脱敏预览上限，请在本机查看原始证据")
+        try:
+            _redact_evidence(json.loads(source.read_text(encoding="utf-8")), secrets)
+        except (ValueError, UnicodeError):
+            continue
+    try:
+        if target.suffix.lower() == ".json":
+            text = json.dumps(_redact_evidence(json.loads(text), secrets), ensure_ascii=False, indent=2)
+        elif target.suffix.lower() == ".jsonl":
+            records = []
+            for line in text.splitlines():
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    record = {"type": "console.evidence_redacted", "reason": "malformed_jsonl"}
+                _redact_evidence(record, secrets)
+                records.append(record)
+            # Collect from every record before serializing; decoded string values
+            # are redacted before JSON escaping, including quotes and newlines.
+            text = "\n".join(json.dumps(_redact_evidence(record, secrets), ensure_ascii=False)
+                             for record in records) + "\n"
+        elif target.suffix.lower() in {".yaml", ".yml"}:
+            value = yaml.safe_load(text)
+            _redact_evidence(value, secrets)
+            text = yaml.safe_dump(_redact_evidence(value, secrets), allow_unicode=True)
+    except (ValueError, yaml.YAMLError):
+        raise HTTPException(403, "结构化证据无法安全脱敏，请在本机查看原始文件")
+    if target.suffix.lower() in {".log", ".txt"}:
+        text = _redact_evidence_text(text, secrets)
+    return Response(text, media_type="text/plain", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
 STATIC = Path(__file__).resolve().parent / "static"
 DENIED = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "auth.json", "*.p12", "*.jks")
 
@@ -328,7 +422,7 @@ def create_app(settings: Settings, console: Console | None = None,
             raise HTTPException(404, "证据文件不存在")
         if any(fnmatch.fnmatch(target.name, pattern) for pattern in DENIED):
             raise HTTPException(403, "拒绝访问敏感文件")
-        return FileResponse(target)
+        return _public_evidence(target, root)
 
     if serve_static:
         app.mount("/static", StaticFiles(directory=STATIC), name="static")

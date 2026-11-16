@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS combos (
     mean_reward_scored REAL,
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
+    input_tokens_missing INTEGER,
+    output_tokens_missing INTEGER,
     PRIMARY KEY (job, agent, model, dataset)
 );
 CREATE TABLE IF NOT EXISTS trials (
@@ -73,6 +75,7 @@ CREATE TABLE IF NOT EXISTS trials (
     output_tokens INTEGER NOT NULL DEFAULT 0,
     evidence TEXT,
     evidence_links TEXT,
+    diagnostics TEXT,
     PRIMARY KEY (job, trial)
 );
 CREATE INDEX IF NOT EXISTS trials_job ON trials (job);
@@ -117,10 +120,16 @@ class Database:
         with self.connect() as connection:
             connection.executescript(SCHEMA)
             # Console databases created before diagnostics existed keep working.
-            columns = {row["name"] for row in connection.execute("PRAGMA table_info(trials)")}
-            for name, kind in (("error_message", "TEXT"), ("evidence_links", "TEXT")):
-                if name not in columns:
-                    connection.execute(f"ALTER TABLE trials ADD COLUMN {name} {kind}")
+            migrations = {
+                "trials": (("error_message", "TEXT"), ("evidence_links", "TEXT"),
+                           ("diagnostics", "TEXT")),
+                "combos": (("input_tokens_missing", "INTEGER"), ("output_tokens_missing", "INTEGER")),
+            }
+            for table, fields in migrations.items():
+                columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+                for name, kind in fields:
+                    if name not in columns:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     # ---------------------------------------------------------------- runs
     def create_run(self, name: str, matrix_yaml: str, dry_run: bool):
@@ -183,21 +192,23 @@ class Database:
             connection.executemany(
                 "INSERT INTO combos (job, agent, model, dataset, planned, recorded, missing, "
                 "errors, scored, passed, unscored, pass_rate_planned, pass_rate_recorded, "
-                "mean_reward_scored, input_tokens, output_tokens) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "mean_reward_scored, input_tokens, output_tokens, input_tokens_missing, output_tokens_missing) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(job["name"], c["agent"], c["model"], c["dataset"], c.get("planned"),
                   c["recorded"], c.get("missing"), c["errors"], c["scored"], c["passed"],
                   c["unscored"], c.get("pass_rate_planned"), c.get("pass_rate_recorded"),
-                  c.get("mean_reward_scored"), c["input_tokens"], c["output_tokens"])
+                  c.get("mean_reward_scored"), c.get("input_tokens") or 0, c.get("output_tokens") or 0,
+                  c.get("input_tokens_missing"), c.get("output_tokens_missing"))
                  for c in combos])
             connection.executemany(
                 "INSERT INTO trials (job, trial, task, agent, model, dataset, reward, error, "
-                "error_message, duration_sec, input_tokens, output_tokens, evidence, evidence_links) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "error_message, duration_sec, input_tokens, output_tokens, evidence, evidence_links, diagnostics) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [(job["name"], t["trial"], t.get("task"), t.get("agent"), t.get("model"),
                   t.get("dataset"), t.get("reward"), t.get("error"), t.get("error_message"),
                   t.get("duration_sec"), t.get("input_tokens") or 0,
-                  t.get("output_tokens") or 0, t.get("evidence"), t.get("evidence_links"))
+                  t.get("output_tokens") or 0, t.get("evidence"), t.get("evidence_links"),
+                  t.get("diagnostics"))
                  for t in trials])
             connection.executemany(
                 "INSERT INTO missing_trials (job, dataset, task, agent, model, missing) "
@@ -245,7 +256,13 @@ class Database:
                 return None
             combos = connection.execute(
                 "SELECT * FROM combos WHERE job = ? ORDER BY dataset, agent, model", (name,)).fetchall()
-        return {**dict(job), "combos": [dict(row) for row in combos]}
+        groups = [dict(row) for row in combos]
+        for group in groups:
+            for field in ("input_tokens", "output_tokens"):
+                missing = group.get(field + "_missing")
+                if missing is None or not group["recorded"] or missing == group["recorded"]:
+                    group[field] = None
+        return {**dict(job), "combos": groups}
 
     def query_trials(self, job: str, *, agent=None, model=None, dataset=None,
                      outcome=None, query=None, limit=200, offset=0):
@@ -289,6 +306,16 @@ class Database:
             trial["evidence_links"] = json.loads(raw) if raw else []
         except ValueError:
             trial["evidence_links"] = []
+        try:
+            diagnostics = json.loads(trial.get("diagnostics") or "{}")
+            trial["diagnostics"] = diagnostics if isinstance(diagnostics, dict) else {}
+        except ValueError:
+            trial["diagnostics"] = {}
+        usage = trial["diagnostics"].get("usage") or {}
+        # Old NOT NULL columns retain storage compatibility; the API exposes unknown as null.
+        for field in ("input_tokens", "output_tokens"):
+            if not isinstance(usage, dict) or usage.get(field + "_known") is not True:
+                trial[field] = None
         return trial
 
     def missing_trials(self, job: str, limit: int = 2000):

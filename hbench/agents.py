@@ -6,6 +6,7 @@ import json
 import re
 import shlex
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from packaging.specifiers import SpecifierSet
@@ -27,7 +28,7 @@ PI_MCP_ADAPTER_VERSION = "7.0.1"
 PI_MCP_VERSIONS = SpecifierSet(">=1.0.0,<2.0.0")
 PI_MCP_EXTENSION = "/tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts"
 PI_MCP_CONFIG = "/tmp/harbor-pi-agent/mcp.json"
-AGENTSCOPE_CLI_VERSION = "1.4.0"
+AGENTSCOPE_CLI_VERSION = "1.5.0"
 JAVA_CLI = (
     "java -cp '/opt/harness/classes:/opt/harness/dependency/*' "
     "io.agentscope.examples.eval.HarnessEvalCli"
@@ -113,14 +114,18 @@ class FrozenPi(Pi):
 
     def _build_custom_models_json(self, access, model_id):
         models_json = super()._build_custom_models_json(access, model_id)
-        if models_json is not None:
+        hostname = urlsplit(access.execution_base_url or "").hostname
+        bailian = hostname in {
+            "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "dashscope-us.aliyuncs.com",
+        }
+        if models_json is not None and bailian:
             for provider in models_json["providers"].values():
                 for model in provider["models"]:
                     # Pi sends the OpenAI ``developer`` role whenever a custom
                     # endpoint's model is marked reasoning-capable. Bailian only
                     # accepts system/assistant/user/tool/function and rejects
                     # those requests with HTTP 400.
-                    model["compat"] = {"supportsDeveloperRole": False}
+                    model["compat"] = {**(model.get("compat") or {}), "supportsDeveloperRole": False}
         return models_json
 
     def get_version_command(self):
@@ -194,6 +199,22 @@ class AgentScopeJavaOptions(InstalledAgentOptions):
     disable_memory_hooks: bool = Field(
         default=True,
         description="Turn off flush/consolidation; Pi and Codex have no equivalent pipeline.",
+    )
+    journal_enabled: bool = Field(
+        default=True,
+        description="AgentScope 2.1 thread journal; stored under the evidence state dir, not the workspace.",
+    )
+    repeated_failure_guard: bool = Field(
+        default=True,
+        description="Kernel guard that warns before repeating an identical failing tool call.",
+    )
+    tool_result_eviction: bool = Field(
+        default=True,
+        description="Kernel eviction of oversized tool results before the next model call.",
+    )
+    read_file_max_chars: int | None = Field(
+        default=None, ge=16000,
+        description="Upper bound for one read_file page; None keeps the kernel default (32000).",
     )
     system_prompt: str = ""
 
@@ -303,7 +324,8 @@ class AgentScopeJava(BaseInstalledAgent):
             "EVAL_STATE_DIR": str(self.environment_logs_dir / "workspace-state"),
             "EVAL_SYSTEM_PROMPT": self.options.system_prompt,
             "EVAL_SKILLS_DIR": "",
-            "EVAL_MODEL_EXTRA_BODY": extra_body,
+            # Harbor masks env names containing SECRET before DEBUG logging.
+            "EVAL_MODEL_EXTRA_BODY_SECRET": extra_body,
             "EVAL_MODEL_MAX_TOKENS": str(self.options.max_tokens),
             "EVAL_MODEL_TEMPERATURE": (
                 "" if self.options.temperature is None else str(self.options.temperature)
@@ -312,18 +334,24 @@ class AgentScopeJava(BaseInstalledAgent):
             "EVAL_DISABLE_MEMORY_HOOKS": (
                 "true" if self.options.disable_memory_hooks else "false"
             ),
+            "EVAL_JOURNAL_ENABLED": "true" if self.options.journal_enabled else "false",
+            "EVAL_DISABLE_REPEATED_FAILURE_GUARD": (
+                "false" if self.options.repeated_failure_guard else "true"
+            ),
+            "EVAL_DISABLE_TOOL_RESULT_EVICTION": (
+                "false" if self.options.tool_result_eviction else "true"
+            ),
         }
+        if self.options.read_file_max_chars is not None:
+            env["EVAL_READ_FILE_MAX_CHARS"] = str(self.options.read_file_max_chars)
         if self.options.max_turns is not None:
             env["MAX_TURNS"] = str(self.options.max_turns)
         if self.options.context_window_tokens:
             env["EVAL_MODEL_CONTEXT_WINDOW"] = str(self.options.context_window_tokens)
         command = JAVA_CLI + " " + shlex.join([remote_request, native, workdir])
         private_mcp_dir = None
-        context.metadata = {
-            **(context.metadata or {}),
-            "native_log": "native.jsonl",
-            "atif_supported": False,
-        }
+        # Leave the context empty: Harbor only backfills it after downloading logs
+        # when AgentContext.is_empty() is true. Observations belong in post-run.
         try:
             if any(server.headers for server in self.mcp_servers):
                 # A freshly created private directory prevents path/symlink collisions.
@@ -368,8 +396,11 @@ class AgentScopeJava(BaseInstalledAgent):
         totals = {key: 0 for key in (
             "inputTokens", "outputTokens", "cachedTokens", "cacheCreationTokens", "reasoningTokens"
         )}
-        usage_seen = False
+        usage_seen = set()
+        usage_missing = set()
         seen_ids = set()
+        unfinished_calls = set()
+        tool_failures: dict[str, dict[str, int]] = {}
         parse_errors = 0
         try:
             with path.open(encoding="utf-8") as stream:
@@ -390,22 +421,43 @@ class AgentScopeJava(BaseInstalledAgent):
                             key: event[key] for key in (
                                 "session_id", "profile", "candidate_sha",
                                 "candidate_source_sha256", "tools",
-                                "adapter_version", "identity_prompt_version",
-                                "identity_prompt_sha256",
+                                "adapter_version", "harness_version",
+                                "identity_prompt_version", "identity_prompt_sha256",
+                                "journal_enabled", "repeated_failure_guard",
+                                "tool_result_eviction", "read_file_max_chars",
+                                "max_turns", "max_iters", "context_window_tokens",
+                                "max_tokens", "temperature", "enable_thinking", "disable_memory_hooks",
                             ) if key in event
                         }
+                    elif kind == "eval.model_start":
+                        if isinstance(event.get("id"), str):
+                            unfinished_calls.add(event["id"])
                     elif kind == "eval.iteration_limit":
                         metadata["iteration_limit"] = True
+                    elif kind == "eval.tool_failure":
+                        tool = event.get("tool")
+                        error_kind = event.get("error_kind")
+                        tool = tool if isinstance(tool, str) and tool else "unknown"
+                        error_kind = (
+                            error_kind if isinstance(error_kind, str) and error_kind
+                            else "unknown"
+                        )
+                        kinds = tool_failures.setdefault(tool, {})
+                        kinds[error_kind] = kinds.get(error_kind, 0) + 1
                     elif kind in ("eval.completed", "eval.failed"):
                         metadata["native_status"] = kind.removeprefix("eval.")
+                        summary = event.get("tool_failures")
+                        if isinstance(summary, dict):
+                            metadata["tool_failure_summary"] = summary
                         if kind == "eval.failed":
                             metadata["native_error_type"] = event.get("error_type")
                             metadata["iteration_limit"] = event.get("iteration_limit", False)
                     elif kind == "eval.model_end":
                         usage = event.get("usage")
-                        if not isinstance(usage, dict):
-                            continue
+                        usage = usage if isinstance(usage, dict) else {}
                         call_id = event.get("id")
+                        if isinstance(call_id, str):
+                            unfinished_calls.discard(call_id)
                         if isinstance(call_id, str):
                             if call_id in seen_ids:
                                 continue
@@ -414,15 +466,27 @@ class AgentScopeJava(BaseInstalledAgent):
                             value = usage.get(key)
                             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                                 totals[key] += value
-                                usage_seen = True
+                                usage_seen.add(key)
+                            else:
+                                usage_missing.add(key)
         except (OSError, UnicodeError):
             self.logger.warning("Could not fully read Java native logs")
             parse_errors += 1
         metadata["native_parse_errors"] = parse_errors
-        if usage_seen:
-            # ChatUsage.inputTokens already includes cache; never add cachedTokens again.
-            context.n_input_tokens = totals["inputTokens"]
-            context.n_output_tokens = totals["outputTokens"]
-            context.n_cache_tokens = totals["cachedTokens"]
-            metadata["cache_creation_tokens"] = totals["cacheCreationTokens"]
-            metadata["reasoning_tokens"] = totals["reasoningTokens"]
+        if tool_failures:
+            metadata["tool_failures"] = {
+                "total": sum(sum(kinds.values()) for kinds in tool_failures.values()),
+                "by_tool_kind": tool_failures,
+            }
+        if unfinished_calls or parse_errors:
+            usage_missing.update(totals)
+        metadata["native_usage_missing_fields"] = sorted(usage_missing)
+        # Keep observed subtotals for forensic use, but never fabricate absent fields.
+        # Public summaries treat missing fields as unknown, not complete totals.
+        context.n_input_tokens = totals["inputTokens"] if "inputTokens" in usage_seen else None
+        context.n_output_tokens = totals["outputTokens"] if "outputTokens" in usage_seen else None
+        context.n_cache_tokens = totals["cachedTokens"] if "cachedTokens" in usage_seen else None
+        metadata["cache_creation_tokens"] = (
+            totals["cacheCreationTokens"] if "cacheCreationTokens" in usage_seen else None
+        )
+        metadata["reasoning_tokens"] = totals["reasoningTokens"] if "reasoningTokens" in usage_seen else None

@@ -84,7 +84,7 @@ class JobTests(unittest.TestCase):
             self.assertEqual(plan['planned_trials'], 6)
             self.assertEqual(plan['backend'], 'docker')
             self.assertEqual(plan['execution'], 'not_executed')
-            self.assertEqual([a['kwargs']['version'] for a in job['agents']], ['0.167.2', '1.5.2', '1.4.0'])
+            self.assertEqual([a['kwargs']['version'] for a in job['agents']], ['0.167.2', '1.5.2', '1.5.0'])
             raw = yaml.safe_dump(job) + json.dumps(plan)
             self.assertNotIn('model-secret', raw)
             self.assertNotIn('tau-secret', raw)

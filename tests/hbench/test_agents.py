@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -238,7 +239,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     ))
 
     async def test_pi_mcp_native_run_keeps_extension_configuration_and_turn_budget(self):
-        agent = self.agent(FrozenPi, version=PI_VERSION, mcp_servers=[self.mcp()], max_turns=4)
+        endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        agent = self.agent(FrozenPi, version=PI_VERSION, mcp_servers=[self.mcp()], max_turns=4,
+                           base_url=endpoint)
         uploads = {}
         async def upload(source, target):
             uploads[target] = Path(source).read_text()
@@ -273,7 +276,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         uploads.clear()
         self.environment = fake_environment()
         self.environment.upload_file.side_effect = upload
-        native = self.agent(Pi, version=PI_VERSION, mcp_servers=[self.mcp()], max_turns=4)
+        native = self.agent(Pi, version=PI_VERSION, mcp_servers=[self.mcp()], max_turns=4,
+                            base_url=endpoint)
         await native.run("use tools", self.environment, AgentContext())
         native_execution = next(
             call.kwargs for call in self.environment.exec.await_args_list
@@ -293,6 +297,24 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         model = frozen_models["providers"]["harbor-endpoint"]["models"][0]
         self.assertEqual(model.pop("compat"), {"supportsDeveloperRole": False})
         self.assertEqual(frozen_models, native_models)
+
+    def test_pi_compatibility_is_bailian_only_and_preserves_official_fields(self):
+        for endpoint in ("https://dashscope.aliyuncs.com/compatible-mode/v1",
+                         "https://model.invalid/v1",
+                         "https://dashscope.aliyuncs.com.evil.invalid/v1"):
+            with self.subTest(endpoint=endpoint):
+                agent = self.agent(FrozenPi, base_url=endpoint)
+                access = SimpleNamespace(execution_base_url=endpoint)
+                model = {"id": "mock", "compat": {"supportsStore": False}}
+                native = {"providers": {"endpoint": {"models": [model]}}}
+                with patch.object(Pi, "_build_custom_models_json", return_value=native) as build:
+                    actual = agent._build_custom_models_json(access, "mock")
+                build.assert_called_once_with(access, "mock")
+                self.assertIs(actual, native)
+                expected = {"supportsStore": False}
+                if endpoint.startswith("https://dashscope.aliyuncs.com/"):
+                    expected["supportsDeveloperRole"] = False
+                self.assertEqual(model["compat"], expected)
 
     def test_pi_cli_flags_preserve_parent_flags_and_quote_mcp_config(self):
         for servers in ([], [self.mcp()]):
@@ -482,7 +504,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             AgentScopeJava, extra_env={"MODEL_API_KEY": "java-key"}, max_turns=7,
             temperature=0.4, max_tokens=2048, extra_body={"enable_thinking": True, "seed": 8},
             turn_timeout_seconds=123, system_prompt="system text", mcp_servers=[self.mcp()],
-            context_window_tokens=131072,
+            context_window_tokens=131072, journal_enabled=False, repeated_failure_guard=False,
+            tool_result_eviction=False, read_file_max_chars=20000,
         )
         agent.session_id = "harbor-session"
         context = AgentContext(metadata={"existing": True})
@@ -514,7 +537,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env["MAX_TURNS"], "7")
         self.assertEqual(env["EVAL_MODEL_TEMPERATURE"], "0.4")
         self.assertEqual(env["EVAL_MODEL_MAX_TOKENS"], "2048")
-        self.assertEqual(json.loads(env["EVAL_MODEL_EXTRA_BODY"]), {"enable_thinking": True, "seed": 8})
+        self.assertEqual(json.loads(env["EVAL_MODEL_EXTRA_BODY_SECRET"]), {"enable_thinking": True, "seed": 8})
         self.assertEqual(env["EVAL_SYSTEM_PROMPT"], "system text")
         self.assertEqual(env["EVAL_SESSION_ID"], "harbor-session")
         self.assertEqual(env["EVAL_USER_ID"], "harbor-session")
@@ -522,22 +545,30 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env["EVAL_SKILLS_DIR"], "")
         self.assertEqual(env["TURN_TIMEOUT_SECONDS"], "123")
         self.assertEqual(env["EVAL_MODEL_CONTEXT_WINDOW"], "131072")
+        self.assertEqual(env["EVAL_JOURNAL_ENABLED"], "false")
+        self.assertEqual(env["EVAL_DISABLE_REPEATED_FAILURE_GUARD"], "true")
+        self.assertEqual(env["EVAL_DISABLE_TOOL_RESULT_EVICTION"], "true")
+        self.assertEqual(env["EVAL_READ_FILE_MAX_CHARS"], "20000")
         self.assertEqual(json.loads(env["EVAL_MCP_SERVERS"])[0]["name"], "tools")
         self.assertIsNone(execution.kwargs["timeout_sec"])
         self.assertIsNone(execution.kwargs["user"])
-        self.assertEqual(context.metadata, {"existing": True, "native_log": "native.jsonl", "atif_supported": False})
+        self.assertEqual(context.metadata, {"existing": True})
 
     async def test_java_defaults_disable_thinking_and_dashscope_key_is_supported(self):
         agent = self.agent(AgentScopeJava, extra_env={"DASHSCOPE_API_KEY": "dashscope-key"})
         await agent.run("test", self.environment, AgentContext())
         env = next(call.kwargs["env"] for call in self.environment.exec.await_args_list if JAVA_CLI in call.kwargs["command"])
         self.assertEqual(env["MODEL_API_KEY"], "dashscope-key")
-        self.assertEqual(json.loads(env["EVAL_MODEL_EXTRA_BODY"]), {"enable_thinking": False})
+        self.assertEqual(json.loads(env["EVAL_MODEL_EXTRA_BODY_SECRET"]), {"enable_thinking": False})
         self.assertEqual(env["EVAL_MODEL_MAX_TOKENS"], "16384")
         self.assertEqual(env["EVAL_MODEL_TEMPERATURE"], "")
         self.assertNotIn("MAX_TURNS", env)
         self.assertEqual(env["TURN_TIMEOUT_SECONDS"], "0")
         self.assertEqual(env["EVAL_DISABLE_MEMORY_HOOKS"], "true")
+        self.assertEqual(env["EVAL_JOURNAL_ENABLED"], "true")
+        self.assertEqual(env["EVAL_DISABLE_REPEATED_FAILURE_GUARD"], "false")
+        self.assertEqual(env["EVAL_DISABLE_TOOL_RESULT_EVICTION"], "false")
+        self.assertNotIn("EVAL_READ_FILE_MAX_CHARS", env)
         self.assertEqual(env["EVAL_MCP_SERVERS"], "[]")
 
     async def test_java_temperature_none_and_empty_extra_body_are_explicit_opt_outs(self):
@@ -546,7 +577,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         )
         env = next(call.kwargs["env"] for call in self.environment.exec.await_args_list if JAVA_CLI in call.kwargs["command"])
         self.assertEqual(env["EVAL_MODEL_TEMPERATURE"], "")
-        self.assertEqual(env["EVAL_MODEL_EXTRA_BODY"], "{}")
+        self.assertEqual(env["EVAL_MODEL_EXTRA_BODY_SECRET"], "{}")
 
     async def test_java_resolves_mcp_headers_without_logging_or_archiving_credentials(self):
         secret = "private-mcp-secret"
@@ -756,10 +787,31 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     def write_native(self, events):
         (self.logs / "native.jsonl").write_text("\n".join(json.dumps(event) for event in events) + "\n")
 
+    async def test_harbor_download_then_backfill_populates_empty_java_context(self):
+        from harbor.trial.trial import Trial
+        agent = self.agent(AgentScopeJava)
+        context = AgentContext()
+        await agent.run("task", self.environment, context)
+        self.assertTrue(context.is_empty())
+        self.write_native([
+            {"type": "eval.binding", "adapter_version": "1.5.0", "max_tokens": 16384},
+            {"type": "eval.model_end", "usage": {"inputTokens": 12, "outputTokens": 3}},
+            {"type": "eval.completed", "tool_failures": {"total": 1, "by_kind": {"command_failed": 1}}},
+        ])
+        trial = SimpleNamespace(agent=agent, user_agent=None)
+        Trial._populate_agent_context(trial, context)
+        self.assertEqual(context.n_input_tokens, 12)
+        self.assertEqual(context.n_output_tokens, 3)
+        self.assertEqual(context.metadata["native_binding"]["max_tokens"], 16384)
+        self.assertEqual(context.metadata["tool_failure_summary"]["total"], 1)
+
     def test_java_native_usage_metadata_and_raw_output_are_preserved(self):
         self.write_native([
             {"type": "eval.binding", "session_id": "native-session", "profile": "local-project-writable", "tools": ["read"],
-             "adapter_version": "1.4.0", "identity_prompt_version": "coding-agent-v1", "identity_prompt_sha256": "abc"},
+             "adapter_version": "1.5.0", "harness_version": "2.1.0-SNAPSHOT",
+             "identity_prompt_version": "coding-agent-v1", "identity_prompt_sha256": "abc",
+             "journal_enabled": True, "repeated_failure_guard": True,
+             "tool_result_eviction": True, "max_turns": "", "context_window_tokens": 131072},
             {"type": "eval.model_end", "id": "a", "usage": {"inputTokens": 100, "outputTokens": 20, "cachedTokens": 30, "cacheCreationTokens": 4, "reasoningTokens": 5}},
             {"type": "MODEL_RESPONSE", "usage": {"inputTokens": 999}},
             {"type": "eval.model_end", "id": "b", "usage": {"inputTokens": 40, "outputTokens": 10, "cachedTokens": 8}},
@@ -772,7 +824,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(context.cost_usd)
         self.assertEqual(context.metadata["native_status"], "completed")
         self.assertEqual(context.metadata["native_binding"]["session_id"], "native-session")
-        self.assertEqual(context.metadata["native_binding"]["adapter_version"], "1.4.0")
+        self.assertEqual(context.metadata["native_binding"]["adapter_version"], "1.5.0")
+        self.assertEqual(context.metadata["native_binding"]["harness_version"], "2.1.0-SNAPSHOT")
+        self.assertTrue(context.metadata["native_binding"]["journal_enabled"])
         self.assertEqual(context.metadata["native_binding"]["identity_prompt_sha256"], "abc")
         self.assertEqual(context.metadata["cache_creation_tokens"], 4)
         self.assertEqual(context.metadata["reasoning_tokens"], 5)
@@ -781,6 +835,58 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(context.metadata["atif_supported"])
         self.assertEqual((self.logs / "native.jsonl").read_bytes(), original)
         self.assertFalse((self.logs / "trajectory.json").exists())
+
+    def test_java_tool_failure_facts_are_counted_by_tool_and_kind(self):
+        self.write_native([
+            {"type": "eval.tool_failure", "tool": "execute", "error_kind": "command_failed"},
+            {"type": "eval.tool_failure", "tool": "execute", "error_kind": "command_failed"},
+            {"type": "eval.tool_failure", "tool": "read_file", "error_kind": "not_found",
+             "error_scope": "missing.txt", "retriable": False},
+            {"type": "eval.completed", "tool_failures": {"total": 3, "by_kind": {"command_failed": 2, "not_found": 1}}},
+        ])
+        context = AgentContext()
+        self.agent(AgentScopeJava).populate_context_post_run(context)
+        self.assertEqual(context.metadata["tool_failures"], {
+            "total": 3,
+            "by_tool_kind": {
+                "execute": {"command_failed": 2},
+                "read_file": {"not_found": 1},
+            },
+        })
+        self.assertEqual(context.metadata["tool_failure_summary"]["total"], 3)
+
+    def test_java_usage_missing_fields_remain_unknown_with_observed_subtotals(self):
+        self.write_native([
+            {"type": "eval.model_end", "id": "a", "usage": {"inputTokens": 12}},
+            {"type": "eval.completed"},
+        ])
+        context = AgentContext()
+        self.agent(AgentScopeJava).populate_context_post_run(context)
+        self.assertEqual(context.n_input_tokens, 12)
+        self.assertIsNone(context.n_output_tokens)
+        self.assertIsNone(context.n_cache_tokens)
+        self.assertIn("outputTokens", context.metadata["native_usage_missing_fields"])
+        self.assertNotIn("inputTokens", context.metadata["native_usage_missing_fields"])
+        self.write_native([
+            {"type": "eval.model_end", "id": "a", "usage": {"inputTokens": 12, "outputTokens": 0}},
+            {"type": "eval.model_start", "id": "b"},
+            {"type": "eval.model_error", "id": "b", "error_type": "Broken"},
+            {"type": "eval.failed"},
+        ])
+        self.agent(AgentScopeJava).populate_context_post_run(context)
+        self.assertEqual(context.n_input_tokens, 12)
+        self.assertIn("inputTokens", context.metadata["native_usage_missing_fields"])
+        self.assertIn("outputTokens", context.metadata["native_usage_missing_fields"])
+
+    async def test_java_extra_body_is_redacted_from_harbor_debug_logging(self):
+        agent = self.agent(AgentScopeJava, extra_body={"opaque": "body-secret", "enable_thinking": False})
+        with self.assertLogs(agent.logger, level="DEBUG") as logs:
+            await agent.run("task", self.environment, AgentContext())
+        self.assertNotIn("body-secret", "\n".join(logs.output))
+        execution = next(call.kwargs for call in self.environment.exec.await_args_list
+                         if JAVA_CLI in call.kwargs["command"])
+        self.assertNotIn("EVAL_MODEL_EXTRA_BODY", execution["env"])
+        self.assertEqual(json.loads(execution["env"]["EVAL_MODEL_EXTRA_BODY_SECRET"])["opaque"], "body-secret")
 
     def test_java_duplicate_usage_is_not_counted_twice_and_reparse_is_idempotent(self):
         event = {"type": "eval.model_end", "id": "call", "usage": {"inputTokens": 10, "outputTokens": 2, "cachedTokens": 3}}
@@ -841,6 +947,111 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     def test_record_request_rejects_non_text(self):
         with self.assertRaises(TypeError):
             record_request(self.agent(FrozenPi), {"content": "bad"})
+
+
+class JavaObserverTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        dependencies = ROOT / "adapters/agentscope-java/target/dependency"
+        if not shutil.which("javac") or not shutil.which("java") or not list(dependencies.glob("*.jar")):
+            raise unittest.SkipTest("Java runtime and locally built adapter dependencies required")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="java-observer-test-")
+        cls.addClassCleanup(cls.temporary.cleanup)
+        cls.folder = Path(cls.temporary.name)
+        cls.classpath = str(cls.folder) + os.pathsep + str(dependencies / "*")
+        probe = cls.folder / "ObserverProbe.java"
+        probe.write_text(r'''
+package io.agentscope.examples.eval;
+import io.agentscope.core.message.Msg;
+import io.agentscope.core.model.*;
+import io.agentscope.core.tool.search.ToolSearchMode;
+import java.io.*;
+import java.util.*;
+import reactor.core.publisher.Flux;
+public class ObserverProbe {
+    public static void main(String[] args) throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var response = mapper.readValue("{\"choices\":[],\"usage\":{\"prompt_tokens\":12}}",
+            io.agentscope.extensions.model.openai.dto.OpenAIResponse.class);
+        var parsed = new io.agentscope.extensions.model.openai.formatter.OpenAIResponseParser()
+            .parseResponse(response, java.time.Instant.now());
+        assert parsed.getUsage().getOutputTokens() == 0;
+        var evidence = HarnessEvalCli.observedUsage(parsed.getUsage());
+        assert evidence.get("inputTokens").equals(12);
+        assert evidence.get("outputTokens") == null;
+        assert evidence.get("cachedTokens") == null;
+        var messages = new ArrayList<Msg>();
+        var tools = new ArrayList<ToolSchema>();
+        var options = GenerateOptions.builder().maxTokens(16384).build();
+        int[] calls = new int[7];
+        Model delegate = new Model() {
+            public String getModelName() { calls[0]++; return "marker"; }
+            public int getContextWindowSize() { calls[1]++; return 12345; }
+            public ToolSearchMode getToolSearchMode() { calls[2]++; return ToolSearchMode.FUNCTION; }
+            public boolean supportsNativeStructuredOutput() { calls[3]++; return true; }
+            public boolean supportsNativeStructuredOutputWithTools() { calls[4]++; return false; }
+            public boolean supportsToolChoiceSpecific() { calls[5]++; return true; }
+            public Flux<ChatResponse> stream(List<Msg> m, List<ToolSchema> t, GenerateOptions o) {
+                assert m == messages && t == tools && o == options;
+                calls[6]++;
+                return Flux.just(parsed);
+            }
+        };
+        var captured = new StringWriter();
+        var writer = new BufferedWriter(captured);
+        Model observed = HarnessEvalCli.observe(delegate, writer);
+        assert observed.getModelName().equals("marker");
+        assert observed.getContextWindowSize() == 12345;
+        assert observed.getToolSearchMode() == ToolSearchMode.FUNCTION;
+        assert observed.supportsNativeStructuredOutput();
+        assert !observed.supportsNativeStructuredOutputWithTools();
+        assert observed.supportsToolChoiceSpecific();
+        observed.stream(messages, tools, options).blockLast();
+        writer.flush();
+        assert captured.toString().contains("eval.model_start");
+        assert captured.toString().contains("eval.model_end");
+        System.out.print(captured.toString());
+        writer.close();
+        // Failed evidence writes must not prevent the native model call.
+        observed.stream(messages, tools, options).blockLast();
+        for (int i = 0; i < 6; i++) assert calls[i] == 1;
+        assert calls[6] == 2;
+    }
+}
+''', encoding="utf-8")
+        source = ROOT / "adapters/agentscope-java/src/main/java/io/agentscope/examples/eval/HarnessEvalCli.java"
+        compiled = subprocess.run(["javac", "--release", "17", "-cp", str(dependencies / "*"),
+                                   "-d", str(cls.folder), str(source), str(probe)],
+                                  capture_output=True, text=True, timeout=60)
+        if compiled.returncode:
+            raise AssertionError(compiled.stderr)
+
+    def test_observer_preserves_model_contract_even_when_evidence_writer_fails(self):
+        probe = subprocess.run(["java", "-ea", "-cp", self.classpath,
+                                "io.agentscope.examples.eval.ObserverProbe"],
+                               capture_output=True, text=True, timeout=30)
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertIn("Could not write native evidence", probe.stderr)
+        events = [json.loads(line) for line in probe.stdout.splitlines()]
+        usage = next(event["usage"] for event in events if event["type"] == "eval.model_end")
+        self.assertEqual(usage["inputTokens"], 12)
+        self.assertIsNone(usage["outputTokens"])
+        self.assertIsNone(usage["cachedTokens"])
+
+    def test_setup_failure_records_only_safe_error_class(self):
+        request = self.folder / "bad-request.json"
+        request.write_text("{private-request-value", encoding="utf-8")
+        output = self.folder / "failed.jsonl"
+        process = subprocess.run(["java", "-cp", self.classpath,
+                                  "io.agentscope.examples.eval.HarnessEvalCli",
+                                  str(request), str(output), str(self.folder)],
+                                 capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 1)
+        evidence = [json.loads(line) for line in output.read_text().splitlines()]
+        self.assertEqual(evidence[-1]["type"], "eval.failed")
+        self.assertEqual(evidence[-1]["phase"], "adapter_setup_or_cleanup")
+        self.assertTrue(evidence[-1]["error_type"])
+        self.assertNotIn("private-request-value", output.read_text() + process.stderr + process.stdout)
 
 
 class RuntimeDockerfileTests(unittest.TestCase):
