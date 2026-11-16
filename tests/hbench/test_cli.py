@@ -125,6 +125,8 @@ class CliTests(unittest.TestCase):
         self.run.return_value.returncode = 0
         with patch.dict(os.environ, secrets, clear=True), patch('hbench.__main__.harbor_command', return_value='harbor'):
             self.assertEqual(main(['run', '--config', str(plan)]), 0)
+        # Batch runs never prompt: Harbor's host-environment confirmation would fail without a TTY.
+        self.assertIn('--yes', self.run.call_args.args[0])
         env = self.run.call_args.kwargs['env']
         self.assertEqual(env['OPENAI_API_KEY'], 'tau-key')
         self.assertEqual(env['OPENAI_BASE_URL'], 'https://tau.invalid/v1')

@@ -226,10 +226,13 @@ def main(argv=None):
             job = yaml.safe_load(args.config.read_text())
             from harbor.models.job.config import JobConfig
             JobConfig.model_validate(job)
+            # A batch runner has no TTY: Harbor otherwise asks before letting tasks read
+            # host variables (tau3's TAU2_*), and that prompt dies under nohup.
             command = [harbor_command(), "run", "-c", str(args.config.resolve())]
             if args.dry_run:
                 command += ["--dry-run", "--skip-credential-checks"]
             else:
+                command.append("--yes")
                 target = Path(job.get("jobs_dir", ROOT / "artifacts/jobs")) / job["job_name"]
                 if target.exists():
                     raise ValueError("Job directory already exists; render a new plan before execution")
