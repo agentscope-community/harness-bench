@@ -353,8 +353,13 @@ class DockerTests(DockerFixture, unittest.TestCase):
 
 class AsyncDockerTests(DockerFixture, unittest.IsolatedAsyncioTestCase):
     async def test_actual_offline_compose_merge_preserves_entrypoint_cmd_dependencies_and_mounts(self):
-        docker = shutil.which("docker")
-        if not docker:
+        # The Docker CLI alone is not enough: the Compose plugin may be absent (and
+        # `docker compose ... --help` still exits 0), so probe the resolved command.
+        runtime = FrozenDockerEnvironment.runtime()
+        if not shutil.which(runtime.compose[0]):
+            self.skipTest("Docker Compose CLI unavailable; config-only integration test")
+        probe = REAL_RUN([*runtime.compose, "version"], capture_output=True, text=True)
+        if probe.returncode:
             self.skipTest("Docker Compose CLI unavailable; config-only integration test")
         for workload, explicit_command in ((False, False), (True, False), (True, True)):
             with self.subTest(workload=workload, explicit_command=explicit_command):

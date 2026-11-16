@@ -758,7 +758,10 @@ class AsyncEnvironmentTests(EnvironmentFixture, unittest.IsolatedAsyncioTestCase
         env = self.mock_client(self.make_env())
         env.exec = AsyncMock(return_value=ExecResult(return_code=1, stderr="permission denied"))
         env._core_api = NS(read_namespaced_pod=lambda **kwargs: pod_status())
-        with patch("hbench.environment.time.monotonic", side_effect=[0, 1, 31]), patch("hbench.environment.asyncio.sleep", AsyncMock()):
+        # Replace the module-level clock: asyncio's event loop reads time.monotonic from the
+        # shared time module and would otherwise consume this finite sequence.
+        clock = NS(monotonic=Mock(side_effect=[0, 1, 31]))
+        with patch("hbench.environment.time", clock), patch("hbench.environment.asyncio.sleep", AsyncMock()):
             with self.assertRaisesRegex(RuntimeError, "did not terminate"):
                 await env.stop_service("main")
         self.assertNotIn("main", env._stopped_services)
