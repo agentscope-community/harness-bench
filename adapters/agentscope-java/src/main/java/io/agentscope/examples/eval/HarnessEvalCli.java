@@ -56,6 +56,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,16 +68,37 @@ import reactor.core.publisher.Flux;
 /** Runs the production Harness with its workspace tools; records native evidence for the adapter. */
 public final class HarnessEvalCli {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String ADAPTER_VERSION = "1.5.0";
-    private static final String IDENTITY_PROMPT_VERSION = "coding-agent-v1";
-    // Harness is a general framework and ships no root role prompt. Evaluation treats all
-    // three harnesses as terminal coding agents, so the adapter supplies only that product
+    private static final String ADAPTER_VERSION = "1.6.0";
+    private static final String IDENTITY_PROMPT_VERSION = "coding-agent-v2";
+    private static final String DATASET_POLICY_VERSION = "dataset-policy-v1";
+    // Harness is a general framework and ships no root role prompt. Evaluation treats every
+    // harness as an autonomous terminal agent, so the adapter supplies only that product
     // configuration; it contains no task, benchmark, or dataset material.
     static final String IDENTITY_PROMPT =
-            "You are a coding agent working in a terminal workspace. "
-                    + "Inspect files, run commands, and modify code to complete the user's task. "
+            "You are an autonomous agent completing a task in a sandboxed workspace. "
+                    + "Inspect the workspace, run commands, and modify files to complete the task. "
                     + "Work only through the function tools provided in each request; "
                     + "run command-line programs with the execute tool.";
+
+    // Per-dataset environment policy: only how the workspace is graded, stated as product
+    // configuration. It never names a task, test, file, expected value or dataset answer, and
+    // every task of a dataset type receives exactly the same text.
+    static final Map<String, String> DATASET_POLICIES =
+            Map.of(
+                    "terminal",
+                    "Environment policy: this task is graded by checks that run in this same "
+                            + "container after you stop. Keep your changes on disk, do not leave "
+                            + "interactive sessions pending, and end with a brief report of what you "
+                            + "changed.",
+                    "swe",
+                    "Environment policy: this task is a repository issue fix graded by the "
+                            + "repository's original tests. Test files are restored before grading, "
+                            + "so editing or adding tests does not change the result; change source "
+                            + "files only and keep the change minimal.",
+                    "tau",
+                    "Environment policy: this task is a scripted customer-service conversation. "
+                            + "Use the provided task tools to act on the account, and keep every "
+                            + "reply short and grounded in tool results.");
 
     private HarnessEvalCli() {}
 
@@ -241,6 +263,11 @@ public final class HarnessEvalCli {
                                             .project(workspace)
                                             .projectWritable(true))
                             .maxIters(maxIters)
+                            // A scored trial is one agent: subagents would add model calls and
+                            // duplicate work, and Codex/Pi have no equivalent. Disabling the
+                            // middleware also drops its long subagent prompt section, which
+                            // otherwise advertises tools that the deny list removes.
+                            .disableSubagents()
                             // Unattended evaluation has no user to confirm HITL prompts.
                             // Without this, any ASK-gated tool (e.g. tau3's
                             // start_conversation) stops the run instead of executing it.
@@ -254,13 +281,21 @@ public final class HarnessEvalCli {
             if (!readFileMaxChars.isBlank()) {
                 builder.readFileMaxChars(Integer.parseInt(readFileMaxChars));
             }
+            // Dataset type only selects the environment policy above; an unknown or absent
+            // value leaves the base identity prompt unchanged.
+            String datasetType =
+                    System.getenv().getOrDefault("EVAL_DATASET_TYPE", "").trim().toLowerCase();
+            String datasetPolicy = DATASET_POLICIES.get(datasetType);
             String systemContext = System.getenv("EVAL_SYSTEM_PROMPT");
-            // Always set the identity prompt; a supplied system context is appended, never
-            // substituted, matching Pi's --append-system-prompt semantics.
-            builder.sysPrompt(
-                    systemContext == null || systemContext.isBlank()
-                            ? IDENTITY_PROMPT
-                            : IDENTITY_PROMPT + "\n\n" + systemContext);
+            // Always set the identity prompt; the policy block and a supplied system context are
+            // appended, never substituted, matching Pi's --append-system-prompt semantics.
+            StringBuilder prompt = new StringBuilder(IDENTITY_PROMPT);
+            if (datasetPolicy != null) prompt.append("\n\n").append(datasetPolicy);
+            if (systemContext != null && !systemContext.isBlank()) {
+                prompt.append("\n\n").append(systemContext);
+            }
+            String effectivePrompt = prompt.toString();
+            builder.sysPrompt(effectivePrompt);
             String skillsDir = System.getenv("EVAL_SKILLS_DIR");
             if (skillsDir != null && !skillsDir.isBlank()) {
                 builder.projectGlobalSkillsDir(Path.of(skillsDir));
@@ -285,9 +320,13 @@ public final class HarnessEvalCli {
                                                                 "true")))
                                 .build());
             }
-            if (System.getenv("EVAL_DENY_TOOL") != null) {
+            // Operator opt-out of tools the evaluation environment cannot use (offline network,
+            // single agent, synchronous execute). Names come from configuration; an unknown name
+            // is left to the kernel's own validation.
+            List<String> deniedTools = commaSeparated("EVAL_DENY_TOOLS", "EVAL_DENY_TOOL");
+            if (!deniedTools.isEmpty()) {
                 ToolsConfig toolsConfig = new ToolsConfig();
-                toolsConfig.setDeny(List.of(System.getenv("EVAL_DENY_TOOL")));
+                toolsConfig.setDeny(deniedTools);
                 builder.toolsConfig(toolsConfig);
             }
             if (Boolean.parseBoolean(System.getenv("EVAL_DISABLE_MEMORY_HOOKS"))) {
@@ -305,11 +344,18 @@ public final class HarnessEvalCli {
                         "candidate_source_sha256",
                         System.getenv().getOrDefault("CANDIDATE_SOURCE_SHA256", "unknown"));
                 binding.put("tools", agent.getToolkit().getToolNames());
+                binding.put("denied_tools", deniedTools);
                 binding.put("profile", "local-project-writable");
                 binding.put("adapter_version", ADAPTER_VERSION);
                 binding.put("harness_version", packageVersion(HarnessAgent.class));
                 binding.put("identity_prompt_version", IDENTITY_PROMPT_VERSION);
                 binding.put("identity_prompt_sha256", sha256(IDENTITY_PROMPT));
+                binding.put("dataset_type", datasetPolicy == null ? "none" : datasetType);
+                binding.put("dataset_policy_version", DATASET_POLICY_VERSION);
+                binding.put(
+                        "dataset_policy_sha256",
+                        datasetPolicy == null ? null : sha256(datasetPolicy));
+                binding.put("system_prompt_sha256", sha256(effectivePrompt));
                 binding.put("journal_enabled", journalEnabled);
                 binding.put("repeated_failure_guard", repeatedFailureGuard);
                 binding.put("tool_result_eviction", toolResultEviction);
@@ -534,6 +580,22 @@ public final class HarnessEvalCli {
     private static String env(String name, String fallback) {
         String value = System.getenv(name);
         return value == null ? fallback : value;
+    }
+
+    /**
+     * Reads the first non-blank comma-separated variable. {@code primary} wins; {@code legacy} is
+     * the single-value form kept for existing configurations.
+     */
+    private static List<String> commaSeparated(String primary, String legacy) {
+        String raw = System.getenv(primary);
+        if (raw == null || raw.isBlank()) raw = System.getenv(legacy);
+        List<String> values = new ArrayList<>();
+        if (raw == null) return values;
+        for (String item : raw.split(",")) {
+            String name = item.trim();
+            if (!name.isEmpty()) values.add(name);
+        }
+        return values;
     }
 
     private static String packageVersion(Class<?> type) {

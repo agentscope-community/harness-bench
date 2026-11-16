@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import yaml
+from pydantic import ValidationError
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -47,6 +48,7 @@ from hbench.agents import (
     AgentScopeJavaOptions,
     FrozenCodex,
     FrozenPi,
+    infer_dataset_type,
     record_request,
 )
 from runtime.protocol import validate_request
@@ -539,6 +541,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env["EVAL_MODEL_MAX_TOKENS"], "2048")
         self.assertEqual(json.loads(env["EVAL_MODEL_EXTRA_BODY_SECRET"]), {"enable_thinking": True, "seed": 8})
         self.assertEqual(env["EVAL_SYSTEM_PROMPT"], "system text")
+        # MCP business tools identify tau3; the policy text itself stays task-free.
+        self.assertEqual(env["EVAL_DATASET_TYPE"], "tau")
+        self.assertEqual(env["EVAL_DENY_TOOLS"], "")
         self.assertEqual(env["EVAL_SESSION_ID"], "harbor-session")
         self.assertEqual(env["EVAL_USER_ID"], "harbor-session")
         self.assertEqual(env["EVAL_STATE_DIR"], "/logs/agent/workspace-state")
@@ -570,6 +575,29 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(env["EVAL_DISABLE_TOOL_RESULT_EVICTION"], "false")
         self.assertNotIn("EVAL_READ_FILE_MAX_CHARS", env)
         self.assertEqual(env["EVAL_MCP_SERVERS"], "[]")
+        # No MCP tools and a non-/testbed workdir select the terminal policy.
+        self.assertEqual(env["EVAL_DATASET_TYPE"], "terminal")
+
+    async def test_java_deny_tools_and_dataset_type_reach_the_adapter(self):
+        agent = self.agent(
+            AgentScopeJava, deny_tools=["web_search", " web_fetch ", ""], dataset_type="swe"
+        )
+        await agent.run("test", self.environment, AgentContext())
+        env = next(call.kwargs["env"] for call in self.environment.exec.await_args_list if JAVA_CLI in call.kwargs["command"])
+        self.assertEqual(env["EVAL_DENY_TOOLS"], "web_search,web_fetch")
+        self.assertEqual(env["EVAL_DATASET_TYPE"], "swe")
+
+    def test_infer_dataset_type_uses_container_conventions(self):
+        self.assertEqual(infer_dataset_type("auto", True, "/app"), "tau")
+        self.assertEqual(infer_dataset_type("auto", False, "/testbed"), "swe")
+        self.assertEqual(infer_dataset_type("auto", False, "/testbed/pkg"), "swe")
+        self.assertEqual(infer_dataset_type("auto", False, "/app"), "terminal")
+        self.assertEqual(infer_dataset_type("auto", False, "/workspace"), "terminal")
+        self.assertEqual(infer_dataset_type("tau", False, "/testbed"), "tau")
+
+    async def test_java_options_reject_unknown_dataset_type(self):
+        with self.assertRaises(ValidationError):
+            AgentScopeJavaOptions(dataset_type="appworld")
 
     async def test_java_temperature_none_and_empty_extra_body_are_explicit_opt_outs(self):
         await self.agent(AgentScopeJava, temperature=None, extra_body={}).run(
@@ -794,7 +822,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         await agent.run("task", self.environment, context)
         self.assertTrue(context.is_empty())
         self.write_native([
-            {"type": "eval.binding", "adapter_version": "1.5.0", "max_tokens": 16384},
+            {"type": "eval.binding", "adapter_version": "1.6.0", "max_tokens": 16384},
             {"type": "eval.model_end", "usage": {"inputTokens": 12, "outputTokens": 3}},
             {"type": "eval.completed", "tool_failures": {"total": 1, "by_kind": {"command_failed": 1}}},
         ])
@@ -808,7 +836,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
     def test_java_native_usage_metadata_and_raw_output_are_preserved(self):
         self.write_native([
             {"type": "eval.binding", "session_id": "native-session", "profile": "local-project-writable", "tools": ["read"],
-             "adapter_version": "1.5.0", "harness_version": "2.1.0-SNAPSHOT",
+             "adapter_version": "1.6.0", "harness_version": "2.1.0-SNAPSHOT",
              "identity_prompt_version": "coding-agent-v1", "identity_prompt_sha256": "abc",
              "journal_enabled": True, "repeated_failure_guard": True,
              "tool_result_eviction": True, "max_turns": "", "context_window_tokens": 131072},
@@ -824,7 +852,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(context.cost_usd)
         self.assertEqual(context.metadata["native_status"], "completed")
         self.assertEqual(context.metadata["native_binding"]["session_id"], "native-session")
-        self.assertEqual(context.metadata["native_binding"]["adapter_version"], "1.5.0")
+        self.assertEqual(context.metadata["native_binding"]["adapter_version"], "1.6.0")
         self.assertEqual(context.metadata["native_binding"]["harness_version"], "2.1.0-SNAPSHOT")
         self.assertTrue(context.metadata["native_binding"]["journal_enabled"])
         self.assertEqual(context.metadata["native_binding"]["identity_prompt_sha256"], "abc")

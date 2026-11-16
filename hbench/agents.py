@@ -28,7 +28,7 @@ PI_MCP_ADAPTER_VERSION = "7.0.1"
 PI_MCP_VERSIONS = SpecifierSet(">=1.0.0,<2.0.0")
 PI_MCP_EXTENSION = "/tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts"
 PI_MCP_CONFIG = "/tmp/harbor-pi-agent/mcp.json"
-AGENTSCOPE_CLI_VERSION = "1.5.0"
+AGENTSCOPE_CLI_VERSION = "1.6.0"
 JAVA_CLI = (
     "java -cp '/opt/harness/classes:/opt/harness/dependency/*' "
     "io.agentscope.examples.eval.HarnessEvalCli"
@@ -74,6 +74,21 @@ async def _check_version(agent, environment, baked: str) -> dict:
     # Prevent BaseInstalledAgent.setup from doing a second version probe.
     agent._version = actual
     return evidence
+
+
+def infer_dataset_type(configured: str, has_mcp_servers: bool, workdir: str) -> str:
+    """Pick the prompt environment policy from public task-container conventions.
+
+    tau3 exposes MCP business tools, SWE-bench works inside /testbed and terminal tasks in
+    /app. The result only chooses a fixed policy paragraph; it carries no task content.
+    """
+    if configured != "auto":
+        return configured
+    if has_mcp_servers:
+        return "tau"
+    if workdir == "/testbed" or workdir.startswith("/testbed/"):
+        return "swe"
+    return "terminal"
 
 
 class FrozenCodexOptions(CodexOptions):
@@ -217,6 +232,21 @@ class AgentScopeJavaOptions(InstalledAgentOptions):
         description="Upper bound for one read_file page; None keeps the kernel default (32000).",
     )
     system_prompt: str = ""
+    deny_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Harness tool names removed before the run (offline network, subagent/thread "
+            "orchestration, background-task tools). Applied uniformly to every task."
+        ),
+    )
+    dataset_type: str = Field(
+        default="auto",
+        pattern=r"^(auto|terminal|swe|tau)$",
+        description=(
+            "Environment policy selected at prompt assembly: auto infers terminal/swe/tau from "
+            "the task container, the rest pin it. The policy text never contains task material."
+        ),
+    )
 
 
 class AgentScopeJava(BaseInstalledAgent):
@@ -315,6 +345,9 @@ class AgentScopeJava(BaseInstalledAgent):
         if not workdir.startswith("/") or "\n" in workdir:
             raise RuntimeError("Could not resolve the environment working directory")
         session_id = self.session_id or str(self.context_id or uuid4())
+        dataset_type = infer_dataset_type(
+            self.options.dataset_type, bool(mcp_configs), workdir
+        )
         env = {
             "MODEL_API_KEY": connection.api_key,
             "MODEL_ID": self._parsed_model_name,
@@ -323,6 +356,10 @@ class AgentScopeJava(BaseInstalledAgent):
             "EVAL_USER_ID": session_id,
             "EVAL_STATE_DIR": str(self.environment_logs_dir / "workspace-state"),
             "EVAL_SYSTEM_PROMPT": self.options.system_prompt,
+            "EVAL_DATASET_TYPE": dataset_type,
+            "EVAL_DENY_TOOLS": ",".join(
+                name.strip() for name in self.options.deny_tools if name.strip()
+            ),
             "EVAL_SKILLS_DIR": "",
             # Harbor masks env names containing SECRET before DEBUG logging.
             "EVAL_MODEL_EXTRA_BODY_SECRET": extra_body,

@@ -24,7 +24,7 @@
 | --- | --- | --- |
 | Codex | `0.167.2` | 仅 `openai_responses` |
 | Pi | `1.5.2` | `openai_chat_completions`、`openai_responses`、`anthropic_messages` |
-| AgentScope Java | `1.5.0` | 仅 `openai_chat_completions` |
+| AgentScope Java | `1.6.0` | 仅 `openai_chat_completions` |
 
 Pi 要求 Node >=22.19.0，使用外部 `pi-mcp-adapter` `7.0.1`（Pi 兼容范围 `>=1.0.0,<2.0.0`）。
 

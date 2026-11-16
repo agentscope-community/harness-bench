@@ -2,7 +2,27 @@ name: agentscope-java
 import_path: hbench.agents:AgentScopeJava
 supported_api_formats: [openai_chat_completions]
 kwargs:
-  version: 1.5.0
+  version: 1.6.0
+  # Evaluation containers have no useful network, one agent and a synchronous
+  # execute tool, so these product tools only add schema/selection cost. Deny
+  # is configuration, applied to every task; the effective tool list is
+  # recorded in eval.binding evidence.
+  deny_tools:
+    - web_search
+    - web_fetch
+    - agent_spawn
+    - agent_send
+    - agent_list
+    - thread_list
+    - thread_history
+    - thread_search
+    - task_output
+    - task_cancel
+    - task_list
+    - wait_async_results
+  # auto picks terminal/swe/tau from the task container (MCP tools, /testbed,
+  # /app) and appends that dataset's fixed environment policy paragraph.
+  dataset_type: auto
   # Pi defaults to 16384 for custom endpoints; keep the same ceiling.
   max_tokens: 16384
   # No step cap and no inner stream deadline: the Harbor trial timeout is the
