@@ -10,6 +10,26 @@ from hbench_console.ingest import _agent_identity
 
 
 class RegistryTests(unittest.TestCase):
+    def test_openclaw_native_events_keep_messages_after_large_system_events(self):
+        from hbench.extended_agents import _openclaw_export_to_session
+        from harbor.agents.installed.openclaw import openclaw_session_jsonl_to_atif_steps
+
+        messages = [
+            {"role": "user", "content": "read file"},
+            {"role": "assistant", "content": [{"type": "toolCall", "id": "call-1", "name": "read", "arguments": {"path": "/app/input"}}]},
+            {"role": "toolResult", "toolCallId": "call-1", "content": [{"type": "text", "text": "42"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        ]
+        events = [{"source": "transcript", "data": {"customType": "system", "data": "[Truncated]"}}]
+        events += [{"source": "transcript", "data": {"message": m}} for m in messages]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.jsonl"
+            path.write_text(_openclaw_export_to_session("\n".join(json.dumps(e) for e in events)))
+            steps = openclaw_session_jsonl_to_atif_steps(path, instruction="read file", model_name="test")
+            self.assertEqual(len(steps), 3)
+            self.assertEqual(steps[1].tool_calls[0].function_name, "read")
+            self.assertEqual(steps[-1].message, "done")
+
     def test_hermes_session_usage_includes_cached_input(self):
         from hbench.extended_agents import FrozenHermes
         from harbor.models.agent.context import AgentContext

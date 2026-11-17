@@ -1,5 +1,6 @@
 """Native Harbor adapters using the prebuilt extended runtime."""
 import json
+import inspect
 import shlex
 from harbor.agents.base import BaseAgent
 from harbor.agents.agent_auth_resolution import ModelConnectionSpec
@@ -13,6 +14,26 @@ from hbench.agents import _probe, record_request
 from hbench.registry import harness_registry
 
 EXTENSIONS = "/opt/hbench-runtime/extensions"
+
+
+def _openclaw_export_to_session(events_text):
+    """Convert per-event native exports, avoiding the bundle-wide size limit."""
+    import json
+
+    messages = []
+    for line in events_text.splitlines():
+        event = json.loads(line)
+        if not isinstance(event, dict) or event.get("source") != "transcript":
+            continue
+        data = event.get("data")
+        message = data.get("message") if isinstance(data, dict) else None
+        if not isinstance(message, dict) or message.get("role") not in {"user", "assistant", "toolResult"}:
+            continue
+        messages.append({"type": "message", "id": event.get("entryId"),
+                         "timestamp": event.get("ts"), "message": message})
+    if not messages:
+        raise ValueError("OpenClaw exported no transcript messages")
+    return "".join(json.dumps(message) + "\n" for message in messages)
 
 
 class FrozenNative:
@@ -160,12 +181,12 @@ class FrozenOpenClaw(FrozenNative, OpenClaw):
             f"--session-key {shlex.quote('agent:' + agent_id + ':main')} "
             "--workspace /tmp/hbench-export --output trial --json"
         )
-        convert = (
-            "import json; from pathlib import Path; "
-            "p=Path('/tmp/hbench-export/.openclaw/trajectory-exports/trial/session-branch.json'); "
-            "d=json.loads(p.read_text()); "
-            "Path('/logs/agent/openclaw.session.jsonl').write_text("
-            "''.join(json.dumps(e)+'\\n' for e in d['entries']))"
+        convert = inspect.getsource(_openclaw_export_to_session) + "\n" + (
+            "from pathlib import Path\n"
+            "p=Path('/tmp/hbench-export/.openclaw/trajectory-exports/trial/events.jsonl')\n"
+            "events=p.read_text()\n"
+            "Path('/logs/agent/openclaw.events.jsonl').write_text(events)\n"
+            "Path('/logs/agent/openclaw.session.jsonl').write_text(_openclaw_export_to_session(events))\n"
         )
         await self.exec_as_agent(
             environment, command=export + " && python3 -c " + shlex.quote(convert),
