@@ -261,7 +261,7 @@ class Ingestor:
         for entry in sorted(root.iterdir()):
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
-            if not self._has_evidence(entry):
+            if not self._is_job_dir(entry):
                 continue
             seen.add(entry.name)
             results.append(self._ingest(entry))
@@ -269,13 +269,21 @@ class Ingestor:
         return results
 
     @staticmethod
-    def _has_evidence(job_dir: Path) -> bool:
-        return (job_dir / "result.json").is_file() or any(job_dir.glob("*/result.json"))
+    def _is_job_dir(job_dir: Path) -> bool:
+        return (
+            (job_dir / "config.json").is_file()
+            or (job_dir / "result.json").is_file()
+            or any(job_dir.glob("*/result.json"))
+        )
 
     def _ingest(self, job_dir: Path) -> dict:
         name = job_dir.name
         report = self.settings.reports_root / name
         try:
+            # A running job has config.json (and usually lock.json) but no result.json yet.
+            # Index it with zero recorded trials so the console shows it before completion.
+            if (job_dir / "config.json").is_file() and not (job_dir / "result.json").is_file():
+                return self._ingest_running(job_dir)
             if self._needs_refresh(job_dir, report):
                 self._summarize(job_dir, report)
             summary = json.loads((report / "summary.json").read_text(encoding="utf-8"))
@@ -286,6 +294,24 @@ class Ingestor:
             message = f"{type(error).__name__}: {str(error)[:300]}"
             self.database.record_job_error(name, str(job_dir), message)
             return {"name": name, "status": "error", "error": message}
+
+    def _ingest_running(self, job_dir: Path) -> dict:
+        name = job_dir.name
+        try:
+            config = json.loads((job_dir / "config.json").read_text(encoding="utf-8"))
+            planned = config.get("n_trials")
+        except (OSError, ValueError):
+            planned = None
+        summary = {
+            "recorded_trials": 0,
+            "planned_trials": planned,
+            "groups": [],
+            "trials": [],
+            "pass_rate_planned": None,
+            "note": "Job is running; no trial results yet.",
+        }
+        self._store(name, job_dir, summary)
+        return {"name": name, "status": "running", "recorded_trials": 0}
 
     @staticmethod
     def _needs_refresh(job_dir: Path, report: Path) -> bool:

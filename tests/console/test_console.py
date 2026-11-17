@@ -82,6 +82,7 @@ class ConsoleFixture(unittest.TestCase):
             hbench_cmd=((sys.executable, "-m", "hbench") if real_hbench
                         else (sys.executable, str(self.fake))),
             viewer_url=None, host="127.0.0.1", port=8090, sync_on_start=False,
+            sync_interval_seconds=0,
         )
 
     def client(self, settings=None, start_worker=False):
@@ -426,6 +427,35 @@ class IngestTests(ConsoleFixture):
         shutil.rmtree(settings.jobs_root / name)
         ingestor.sync()
         self.assertEqual(database.list_jobs(), [])
+
+    def test_running_job_is_indexed_before_any_trial_finishes(self):
+        settings = self.make_settings(allow_real_runs=False, real_hbench=True)
+        name = "running-job"
+        job_dir = settings.jobs_root / name
+        job_dir.mkdir(parents=True)
+        job_dir.joinpath("config.json").write_text(json.dumps({
+            "job_name": name, "n_trials": 5646, "agents": [], "datasets": []
+        }))
+        database = Database(settings.database)
+        database.initialize()
+        ingestor = Ingestor(settings, database)
+        result = next(r for r in ingestor.sync() if r["name"] == name)
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(result["recorded_trials"], 0)
+        client, _ = self.client(settings)
+        job = client.get(f"/api/jobs/{name}").json()
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["recorded_trials"], 0)
+        self.assertEqual(job["planned_trials"], 5646)
+
+    def test_indexed_job_reports_status_indexed(self):
+        settings = self.make_settings(allow_real_runs=False, real_hbench=True)
+        name = self.demo_job(settings)
+        database = Database(settings.database)
+        database.initialize()
+        Ingestor(settings, database).sync()
+        client, _ = self.client(settings)
+        self.assertEqual(client.get(f"/api/jobs/{name}").json()["status"], "indexed")
 
 
 class MultiStepEvidenceTests(ConsoleFixture):

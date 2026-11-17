@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 
 from fastapi import FastAPI, HTTPException, Query
@@ -273,6 +274,17 @@ def create_app(settings: Settings, console: Console | None = None,
             if settings.sync_on_start:
                 threading.Thread(target=state.ingestor.sync, name="console-initial-sync",
                                  daemon=True).start()
+            if settings.sync_interval_seconds > 0:
+                def _sync_loop():
+                    while True:
+                        time.sleep(settings.sync_interval_seconds)
+                        try:
+                            state.ingestor.sync()
+                        except Exception:
+                            pass
+
+                threading.Thread(target=_sync_loop, name="console-sync-poller",
+                                 daemon=True).start()
         yield
         if start_worker:
             state.runner.stop()
@@ -357,9 +369,23 @@ def create_app(settings: Settings, console: Console | None = None,
     def sync_jobs():
         return {"results": state.ingestor.sync(), "last": state.ingestor.last_sync}
 
+    def _job_status(path: str) -> str:
+        try:
+            job_path = Path(path)
+        except (OSError, ValueError):
+            return "unknown"
+        if (job_path / "result.json").is_file():
+            return "indexed"
+        if (job_path / "config.json").is_file():
+            return "running"
+        return "unknown"
+
     @app.get("/api/jobs")
     def list_jobs():
-        return {"jobs": state.database.list_jobs(),
+        jobs = state.database.list_jobs()
+        for job in jobs:
+            job["status"] = _job_status(job["path"])
+        return {"jobs": jobs,
                 "sync": {"last": state.ingestor.last_sync, "error": state.ingestor.last_error}}
 
     @app.get("/api/jobs/{name}")
@@ -367,6 +393,7 @@ def create_app(settings: Settings, console: Console | None = None,
         job = state.database.get_job(name)
         if job is None:
             raise HTTPException(404, "作业不存在")
+        job["status"] = _job_status(job["path"])
         job["agents"] = sorted({c["agent"] for c in job["combos"]})
         job["models"] = sorted({c["model"] for c in job["combos"]})
         job["datasets"] = sorted({c["dataset"] for c in job["combos"]})

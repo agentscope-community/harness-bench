@@ -30,6 +30,7 @@ class Settings:
     host: str
     port: int
     sync_on_start: bool
+    sync_interval_seconds: int
 
     @classmethod
     def from_env(cls, env=None) -> "Settings":
@@ -43,6 +44,11 @@ class Settings:
             raise ValueError("Invalid console setting") from error
         if not argv:
             raise ValueError("CONSOLE_HBENCH_CMD must not be empty")
+        sync_interval = env.get("CONSOLE_SYNC_INTERVAL_SECONDS", "30").strip()
+        try:
+            sync_interval_seconds = int(sync_interval) if sync_interval else 30
+        except ValueError as error:
+            raise ValueError("CONSOLE_SYNC_INTERVAL_SECONDS must be an integer") from error
         return cls(
             repo_root=REPO_ROOT,
             data_dir=data_dir,
@@ -55,6 +61,7 @@ class Settings:
             host=(env.get("CONSOLE_HOST") or "0.0.0.0").strip(),
             port=port,
             sync_on_start=not _flag("CONSOLE_SKIP_STARTUP_SYNC"),
+            sync_interval_seconds=sync_interval_seconds,
         )
 
     @property
