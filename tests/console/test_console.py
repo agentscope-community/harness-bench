@@ -813,6 +813,32 @@ class ApiTests(ConsoleFixture):
         bad = client.post("/api/runs/preview", json={"matrix": "name: m\n", "overrides": {"bogus": 1}})
         self.assertEqual(bad.status_code, 422)
 
+    def test_real_run_gate_can_be_toggled_from_the_console(self):
+        client, _ = self.client()
+        self.assertFalse(client.get("/api/settings").json()["allow_real_runs"])
+        self.assertFalse(client.get("/api/catalog").json()["allow_real_runs"])
+        response = client.put("/api/settings/real-runs", json={"allow": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["allow_real_runs"])
+        self.assertTrue(client.get("/api/catalog").json()["allow_real_runs"])
+        self.assertTrue(client.get("/api/health").json()["allow_real_runs"])
+        created = client.post("/api/runs", json={
+            "matrix": "name: m\n", "name": "run-real-toggle", "dry_run": False,
+            "overrides": {"cluster": "docker"}})
+        self.assertEqual(created.status_code, 200)
+        self.assertFalse(created.json()["dry_run"])
+        client.put("/api/settings/real-runs", json={"allow": False})
+        refused = client.post("/api/runs", json={
+            "matrix": "name: m\n", "name": "run-real-off", "dry_run": False})
+        self.assertEqual(refused.status_code, 403)
+        self.assertFalse(client.get("/api/settings").json()["allow_real_runs"])
+
+    def test_real_run_setting_survives_a_restart(self):
+        client, _ = self.client()
+        client.put("/api/settings/real-runs", json={"allow": True})
+        restarted, _ = self.client()
+        self.assertTrue(restarted.get("/api/settings").json()["allow_real_runs"])
+
     def test_preview_overrides_dataset_harness_and_model_lists(self):
         import yaml
         client, _ = self.client()

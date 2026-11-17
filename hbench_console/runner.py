@@ -22,6 +22,7 @@ from .ingest import Ingestor
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 ACTIVE = ("planning", "running", "summarizing", "archiving")
 CANCEL_GRACE_SEC = GRACE_SECONDS
+TRUTHY = {"1", "true", "yes", "on"}
 
 
 class RunnerError(ValueError):
@@ -59,7 +60,21 @@ class Runner:
 
     def status(self):
         return {"active": self._active, "queued": self._queue.qsize(),
-                "allow_real_runs": self.settings.allow_real_runs}
+                "allow_real_runs": self.allow_real_runs()}
+
+    def allow_real_runs(self) -> bool:
+        """Runtime gate; the page toggle overrides the env default."""
+        try:
+            value = self.database.get_setting("allow_real_runs")
+        except Exception:
+            value = None
+        if value is None:
+            return self.settings.allow_real_runs
+        return value.strip().lower() in TRUTHY
+
+    def set_allow_real_runs(self, allow: bool):
+        self.database.set_setting("allow_real_runs", "1" if allow else "0")
+        return self.allow_real_runs()
 
     # -------------------------------------------------------------- submit
     def submit(self, name: str, matrix_yaml: str, dry_run: bool):
@@ -70,8 +85,8 @@ class Runner:
         job_dir = self.settings.jobs_root / name
         if self.database.get_run(name) or matrix_path.exists() or plan_path.exists() or job_dir.exists():
             raise RunnerError("同名运行或作业已存在，请换一个名称")
-        if not dry_run and not self.settings.allow_real_runs:
-            raise RunnerError("真实运行未授权：需要设置 CONSOLE_ALLOW_REAL_RUNS=1")
+        if not dry_run and not self.allow_real_runs():
+            raise RunnerError("真实运行未授权：请在新建运行页打开“允许真实运行”开关")
         self.settings.plans_root.mkdir(parents=True, exist_ok=True)
         matrix_path.write_text(matrix_yaml, encoding="utf-8")
         self.database.create_run(name, matrix_yaml, dry_run)

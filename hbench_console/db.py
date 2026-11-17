@@ -88,6 +88,10 @@ CREATE TABLE IF NOT EXISTS missing_trials (
     missing INTEGER NOT NULL,
     PRIMARY KEY (job, dataset, task, agent, model)
 );
+CREATE TABLE IF NOT EXISTS console_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 RUN_FIELDS = ("name", "status", "matrix_yaml", "plan_path", "job_dir", "planned_trials",
@@ -130,6 +134,19 @@ class Database:
                 for name, kind in fields:
                     if name not in columns:
                         connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+
+    # ------------------------------------------------------------- settings
+    def get_setting(self, key: str) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM console_settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str):
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO console_settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, value))
 
     # ---------------------------------------------------------------- runs
     def create_run(self, name: str, matrix_yaml: str, dry_run: bool):

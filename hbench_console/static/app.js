@@ -695,21 +695,34 @@ async function renderNewRun() {
   const tasks = h("input", { placeholder: "逗号分隔的题目目录名，可空", size: 32 });
   const dryRun = h("input", { type: "checkbox", checked: !catalogData.allow_real_runs });
   if (!catalogData.allow_real_runs) dryRun.disabled = true;
+  const gateNote = h("p", { class: "muted" });
+  const setGate = (allowed) => {
+    dryRun.disabled = !allowed;
+    dryRun.checked = !allowed;
+    gateNote.textContent = allowed
+      ? "当前允许真实运行。默认真实执行；勾选演练模式可只验证计划而不调用模型。"
+      : "当前仅演练模式：可以完整验证计划渲染和调度，但不会调用模型。";
+  };
+  setGate(catalogData.allow_real_runs);
+  const allow = h("input", { type: "checkbox", checked: catalogData.allow_real_runs,
+    onchange: async (event) => {
+      const next = event.target.checked;
+      event.target.disabled = true;
+      try {
+        const data = await api("/api/settings/real-runs", { method: "PUT",
+          body: JSON.stringify({ allow: next }) });
+        catalogData.allow_real_runs = data.allow_real_runs;
+        if (catalog) catalog.allow_real_runs = data.allow_real_runs;
+        modeEl.textContent = data.allow_real_runs ? "真实运行已授权" : "仅演练模式";
+        modeEl.className = `mode ${data.allow_real_runs ? "live" : ""}`;
+        setGate(data.allow_real_runs);
+      } catch (error) {
+        event.target.checked = !next;
+        alert(error.message);
+      } finally { event.target.disabled = false; }
+    } });
   const preview = h("div", { class: "muted", text: "尚未预览。预览只渲染计划，不调用模型。" });
   const message = h("div", {});
-
-  const pickGroup = (title, key, label) => h("div", { class: "checkgroup" },
-    h("div", { class: "spread" }, h("strong", { text: title }),
-      h("span", { class: "muted", text: `${selected[key].size} / ${options[key].length}` })),
-    h("div", { class: "checks" }, options[key].map(option => {
-      const box = h("input", { type: "checkbox", checked: selected[key].has(option),
-        onchange: (event) => {
-          if (event.target.checked) selected[key].add(option); else selected[key].delete(option);
-          event.target.closest(".checkgroup").querySelector(".muted").textContent =
-            `${selected[key].size} / ${options[key].length}`;
-        } });
-      return h("label", { class: "check" }, box, option);
-    })));
 
   function overrides() {
     const value = { cluster: "docker" };
@@ -724,25 +737,52 @@ async function renderNewRun() {
     return value;
   }
 
-  const previewButton = h("button", { text: "预览计划", onclick: async () => {
+  function updateCounts() {
+    for (const key of ["benchmarks", "harnesses", "models"]) {
+      const group = document.querySelector(`[data-group="${key}"]`);
+      if (group) group.querySelector(".muted").textContent = `${selected[key].size} / ${options[key].length}`;
+    }
+  }
+
+  let syncTimer = null;
+  async function sync() {
     const body = overrides();
     if (!body) {
       preview.replaceChildren(errorBox(new Error("至少选择一个数据集、harness 和模型")));
       return;
     }
-    previewButton.disabled = true;
     preview.textContent = "渲染中…";
     try {
       const data = await api("/api/runs/preview", { method: "POST",
         body: JSON.stringify({ matrix: matrix.value, overrides: body }) });
+      matrix.value = data.matrix;
       preview.replaceChildren(
         h("div", {}, "计划 trial：", h("strong", { text: num(data.planned_trials) }), "；组合：",
           h("strong", { text: num((data.combinations || []).length) }), "；后端：",
           h("strong", { text: data.backend || "docker" }), "。" ),
         h("div", { class: "muted", text: `范围：${selected.benchmarks.size} 个数据集 × ${selected.harnesses.size} 个 harness × ${selected.models.size} 个模型。` }));
     } catch (error) { preview.replaceChildren(errorBox(error)); }
-    finally { previewButton.disabled = false; }
-  } });
+  }
+  function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(sync, 300); }
+
+  const pickGroup = (title, key) => h("div", { class: "checkgroup", "data-group": key },
+    h("div", { class: "spread" }, h("strong", { text: title }),
+      h("span", { class: "muted", text: `${selected[key].size} / ${options[key].length}` })),
+    h("div", { class: "checks" }, options[key].map(option => {
+      const box = h("input", { type: "checkbox", checked: selected[key].has(option),
+        onchange: (event) => {
+          if (event.target.checked) selected[key].add(option); else selected[key].delete(option);
+          updateCounts();
+          scheduleSync();
+        } });
+      return h("label", { class: "check" }, box, option);
+    })));
+
+  for (const node of [concurrency, attempts, nTasks, tasks]) {
+    node.addEventListener("input", scheduleSync);
+  }
+
+  const previewButton = h("button", { text: "预览计划", onclick: sync });
 
   const startButton = h("button", { class: "primary", text: "启动", onclick: async () => {
     message.replaceChildren();
@@ -763,9 +803,9 @@ async function renderNewRun() {
   fill(app,
     h("div", { class: "spread" }, h("h1", { text: "新建运行" }), link("#/runs", "返回运行列表")),
     h("div", { class: "card" },
-      h("p", { class: "muted", text: catalogData.allow_real_runs
-        ? "当前允许真实运行。默认真实执行；勾选演练模式可只验证计划而不调用模型。"
-        : "当前仅演练模式：可以完整验证计划渲染和调度，但不会调用模型。管理员设置 CONSOLE_ALLOW_REAL_RUNS=1 后才能真实运行。" }),
+      h("div", { class: "spread" },
+        h("div", {}, h("h2", { text: "运行权限", style: "margin:0 0 4px" }), gateNote),
+        h("label", { class: "row" }, allow, "允许真实运行（调用付费模型）")),
       h("div", { class: "grid-form" },
         h("label", { class: "field" }, "运行名称", name),
         h("label", { class: "field" }, "并发", concurrency),
@@ -779,13 +819,13 @@ async function renderNewRun() {
         pickGroup("数据集", "benchmarks"), pickGroup("Harness", "harnesses"),
         pickGroup("模型", "models")),
       h("label", { class: "row" }, dryRun, "演练模式（--dry-run，不调用模型）"),
-      h("p", { class: "muted", text: "只调整题目数量或目录名时用上面的字段；范围勾选会覆盖矩阵 YAML 中的对应列表。" }),
+      h("p", { class: "muted", text: "上方字段和范围勾选会实时同步到下方矩阵 YAML，运行时以渲染后的 YAML 为准。" }),
       h("div", { class: "toolbar" }, previewButton, startButton),
       preview,
       message),
     h("details", { class: "card" },
-      h("summary", { text: "高级：矩阵 YAML（可选）" }),
-      h("p", { class: "muted", text: "保留完整矩阵文件；上方勾选与字段会作为 overrides 叠加。" }),
+      h("summary", { text: "高级：矩阵 YAML（同步后的实际生效配置）" }),
+      h("p", { class: "muted", text: "修改任意字段或勾选后，系统会把 overrides 写入这段 YAML；启动时直接提交该 YAML，确保所见即所得。" }),
       matrix),
     h("div", { class: "card" },
       h("h2", { text: "模型凭证状态" }),
@@ -796,6 +836,7 @@ async function renderNewRun() {
           h("td", { text: m.profile }), h("td", { text: m.api_key_name || "—" }),
           h("td", {}, m.configured ? badge("已设置", "ok") : badge("未设置", "warn")))))))),
   );
+  scheduleSync();
 }
 
 window.addEventListener("hashchange", route);

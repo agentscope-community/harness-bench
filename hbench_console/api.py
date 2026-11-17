@@ -138,6 +138,10 @@ class RunRequest(MatrixRequest):
     dry_run: bool = True
 
 
+class RealRunsRequest(BaseModel):
+    allow: bool
+
+
 def apply_overrides(text: str, overrides: dict) -> tuple[str, str | None]:
     """Return (yaml text, matrix name) with form overrides validated and applied."""
     unknown = set(overrides) - OVERRIDE_KEYS
@@ -308,13 +312,25 @@ def create_app(settings: Settings, console: Console | None = None,
     @app.get("/api/health")
     def health():
         return {"status": "ok", "version": __version__,
-                "allow_real_runs": settings.allow_real_runs,
+                "allow_real_runs": state.runner.allow_real_runs(),
                 "sync": {"last": state.ingestor.last_sync, "error": state.ingestor.last_error},
                 "runner": state.runner.status()}
 
+    @app.get("/api/settings")
+    def get_settings():
+        return {"allow_real_runs": state.runner.allow_real_runs(),
+                "env_default": settings.allow_real_runs}
+
+    @app.put("/api/settings/real-runs")
+    def set_real_runs(request: RealRunsRequest):
+        return {"allow_real_runs": state.runner.set_allow_real_runs(request.allow),
+                "env_default": settings.allow_real_runs}
+
     @app.get("/api/catalog")
     def get_catalog():
-        return catalog(settings)
+        data = catalog(settings)
+        data["allow_real_runs"] = state.runner.allow_real_runs()
+        return data
 
     @app.get("/api/matrices/{name}")
     def get_matrix(name: str):
@@ -350,8 +366,8 @@ def create_app(settings: Settings, console: Console | None = None,
     @app.post("/api/runs")
     def create_run(request: RunRequest):
         text, _ = apply_overrides(request.matrix, request.overrides)
-        if not request.dry_run and not settings.allow_real_runs:
-            raise HTTPException(403, "真实运行未授权：需要设置 CONSOLE_ALLOW_REAL_RUNS=1")
+        if not request.dry_run and not state.runner.allow_real_runs():
+            raise HTTPException(403, "真实运行未授权：请在新建运行页打开“允许真实运行”开关")
         state.render(text, request.name)
         try:
             run = state.runner.submit(request.name, text, request.dry_run)
