@@ -1,6 +1,6 @@
 name: hermes
 import_path: hbench.extended_agents:FrozenHermes
 supported_api_formats: [openai_chat_completions, openai_responses, anthropic_messages]
-evidence_files: [hermes-session.jsonl]
+evidence_files: [hermes.txt, hermes-session.jsonl]
 kwargs:
   version: v2026.9.24
