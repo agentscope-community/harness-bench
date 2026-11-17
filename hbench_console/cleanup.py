@@ -39,6 +39,17 @@ def project_names(job_dir: Path) -> list[str]:
     return sorted(names)
 
 
+def scoped_projects(project: str) -> list[str]:
+    """Compose projects Harbor derives from one trial directory name.
+
+    The task environment and the verifier run as separate projects, and the
+    one-shot runtime service (``hbench-runtime-init``) is a third container in
+    the environment project. Label filters must name them exactly; only their
+    volumes carry no trial prefix, so the prefix filter alone misses them.
+    """
+    return [project, f"{project}__env", f"{project}__verifier__trial"]
+
+
 def _engine(args: list[str]) -> subprocess.CompletedProcess:
     executable = shutil.which(ENGINE)
     if executable is None:
@@ -79,17 +90,22 @@ def cleanup_job(job_dir: Path, log=lambda message: None) -> dict:
         log(f"cleanup: {ENGINE} 不可用，跳过容器清理")
         return summary
     for project in projects:
-        label = f"label=com.docker.compose.project={project}"
         name = f"name=^{project}[_-]"
         try:
-            containers = sorted(set(_ids(["ps", "-aq", "--filter", label])
-                                    + _ids(["ps", "-aq", "--filter", name])))
-            _remove(["container", "rm", "-f"], "containers", containers, summary, log)
-            networks = sorted(set(_ids(["network", "ls", "-q", "--filter", label])
-                                  + _ids(["network", "ls", "-q", "--filter", name])))
-            _remove(["network", "rm"], "networks", networks, summary, log)
-            volumes = sorted(set(_ids(["volume", "ls", "-q", "--filter", label])))
-            _remove(["volume", "rm", "-f"], "volumes", volumes, summary, log)
+            # The prefix filter also catches the one-shot runtime service
+            # (``<trial>__env-hbench-runtime-init-1``) left behind exited.
+            containers = set(_ids(["ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"]))
+            containers |= set(_ids(["ps", "-aq", "--filter", name]))
+            networks = set(_ids(["network", "ls", "-q", "--filter", name]))
+            volumes: set[str] = set()
+            for scope in scoped_projects(project):
+                label = f"label=com.docker.compose.project={scope}"
+                containers |= set(_ids(["ps", "-aq", "--filter", label]))
+                networks |= set(_ids(["network", "ls", "-q", "--filter", label]))
+                volumes |= set(_ids(["volume", "ls", "-q", "--filter", label]))
+            _remove(["container", "rm", "-f"], "containers", sorted(containers), summary, log)
+            _remove(["network", "rm"], "networks", sorted(networks), summary, log)
+            _remove(["volume", "rm", "-f"], "volumes", sorted(volumes), summary, log)
         except (OSError, subprocess.SubprocessError) as error:
             summary["errors"].append(f"{project}: {type(error).__name__}")
             log(f"cleanup: {project}: {type(error).__name__}: {error}")

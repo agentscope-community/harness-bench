@@ -43,6 +43,28 @@ echo "==> Render plan: $plan"
 echo "==> Dry-run (no model calls)"
 "$python" -m hbench run --config "$plan" --dry-run
 
+# Harness runtime image (and tau3 images when tau3 tasks are selected) must exist
+# before the real run. Build only what is missing; set HB_BUILD_IMAGES=0 to skip.
+if [ "${HB_BUILD_IMAGES:-1}" = 1 ]; then
+  build_args=(images build --runtime-image "$HB_RUNTIME_IMAGE" --execute)
+  rebuild=0
+  docker image inspect "$HB_RUNTIME_IMAGE" >/dev/null 2>&1 || rebuild=1
+  tau3_dataset="${HB_TAU3_DATASET:-artifacts/datasets/tau3-bench}"
+  if grep -q tau3 "$plan"; then
+    if [ ! -d "$tau3_dataset" ]; then
+      echo "[images] tau3 tasks selected but $tau3_dataset is missing; tau3 trials will fail" >&2
+    elif ! docker image inspect hbench/tau3-main:0.1.0 >/dev/null 2>&1 \
+      || ! docker image inspect hbench/tau3-runtime:0.1.0 >/dev/null 2>&1; then
+      rebuild=1
+      build_args+=(--tau3-dataset "$tau3_dataset")
+    fi
+  fi
+  if [ "$rebuild" = 1 ]; then
+    echo "==> Build harness images (Maven + docker build, several minutes)"
+    "$python" -m hbench "${build_args[@]}"
+  fi
+fi
+
 # Optional OSS archive. It runs beside the evaluation: any OSS problem is only
 # printed with an [oss] prefix and never stops trials or changes the exit code.
 job="artifacts/jobs/$name"

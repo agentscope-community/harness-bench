@@ -172,6 +172,14 @@ class Runner:
                            f"{len(contract.get('combinations', []))} combinations, "
                            f"backend={contract.get('backend')}, dry_run={bool(run['dry_run'])}")
 
+            if not run["dry_run"] and not self._ensure_images(plan_path, log):
+                if self._cancel_requested(name):
+                    self._cleanup_resources(name, log)
+                    self.database.update_run(name, status="cancelled", finished_at=now())
+                    self._log(log, "cancelled")
+                    return
+                return self._finish_failed(run, "镜像构建失败，见日志")
+
             command = [*self.settings.hbench_cmd, "run", "--config", str(plan_path)]
             if run["dry_run"]:
                 command.append("--dry-run")
@@ -238,6 +246,26 @@ class Runner:
                 summary.get("networks", 0), summary.get("volumes", 0),
                 f", {len(summary['errors'])} errors" if summary.get("errors") else ""))
         return summary
+
+    def _ensure_images(self, plan_path: Path, log) -> bool:
+        """Build the harness images this plan needs but the host lacks."""
+        runtime = os.environ.get("HB_RUNTIME_IMAGE") or "hbench/harness-runtime:0.1.0"
+        needed = [runtime]
+        uses_tau3 = "tau3" in plan_path.read_text(encoding="utf-8", errors="replace")
+        if uses_tau3:
+            needed += ["hbench/tau3-main:0.1.0", "hbench/tau3-runtime:0.1.0"]
+        missing = [image for image in needed if subprocess.run(
+            ["docker", "image", "inspect", image],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0]
+        if not missing:
+            return True
+        self._log(log, "images: building " + ", ".join(missing))
+        command = [*self.settings.hbench_cmd, "images", "build",
+                   "--runtime-image", runtime, "--execute"]
+        dataset = os.environ.get("HB_TAU3_DATASET") or "artifacts/datasets/tau3-bench"
+        if uses_tau3 and (self.settings.repo_root / dataset).is_dir():
+            command += ["--tau3-dataset", dataset]
+        return self._spawn(command, log) == 0
 
     def _finish_failed(self, run, message: str):
         name = run["name"]

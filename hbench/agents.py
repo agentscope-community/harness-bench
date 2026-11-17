@@ -29,6 +29,9 @@ PI_MCP_VERSIONS = SpecifierSet(">=1.0.0,<2.0.0")
 PI_MCP_EXTENSION = "/tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts"
 PI_MCP_CONFIG = "/tmp/harbor-pi-agent/mcp.json"
 AGENTSCOPE_CLI_VERSION = "1.6.0"
+# A compose exec can stall for tens of seconds on a busy host; never fail a
+# trial on the default 30s budget.
+VERSION_PROBE_TIMEOUT_SEC = 120
 JAVA_CLI = (
     "java -cp '/opt/harness/classes:/opt/harness/dependency/*' "
     "io.agentscope.examples.eval.HarnessEvalCli"
@@ -53,9 +56,24 @@ def _frozen_version(configured: str | None, baked: str) -> str:
     return configured or baked
 
 
+async def _probe(environment, command: str, timeout_sec: int = VERSION_PROBE_TIMEOUT_SEC):
+    """Run a read-only container probe, retrying once when exec itself stalls.
+
+    ``docker compose exec`` can block for tens of seconds on a busy host (many
+    concurrent environment builds). That is a host stall, not a version
+    mismatch, so a timed-out probe is repeated before failing the trial.
+    """
+    for attempt in (1, 2):
+        try:
+            return await environment.exec(command=command, timeout_sec=timeout_sec)
+        except RuntimeError as error:
+            if attempt == 2 or "timed out" not in str(error):
+                raise
+
+
 async def _check_version(agent, environment, baked: str) -> dict:
     requested = agent.version()
-    result = await environment.exec(command=agent.get_version_command(), timeout_sec=30)
+    result = await _probe(environment, agent.get_version_command())
     actual = None
     if result.return_code == 0 and (result.stdout or "").strip():
         actual = agent.parse_version(result.stdout)
@@ -167,12 +185,10 @@ class FrozenPi(Pi):
         evidence = await _check_version(self, environment, PI_VERSION)
         if self.mcp_servers:
             package_json = str(Path(PI_MCP_EXTENSION).with_name("package.json"))
-            result = await environment.exec(
-                command=(
-                    f"test -f {shlex.quote(PI_MCP_EXTENSION)} && "
-                    f"node -p {shlex.quote('require(' + json.dumps(package_json) + ').version')}"
-                ),
-                timeout_sec=30,
+            result = await _probe(
+                environment,
+                f"test -f {shlex.quote(PI_MCP_EXTENSION)} && "
+                f"node -p {shlex.quote('require(' + json.dumps(package_json) + ').version')}",
             )
             actual = (result.stdout or "").strip() if result.return_code == 0 else None
             evidence["mcp_adapter_version"] = actual

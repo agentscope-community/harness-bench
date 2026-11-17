@@ -724,6 +724,34 @@ class RunTests(ConsoleFixture):
         self.assertIn("cleanup: 1 trials, 2 containers, 1 networks, 0 volumes",
                       Path(run["log_path"]).read_text())
 
+    def test_missing_images_are_built_before_the_run(self):
+        database = Database(self.settings.database)
+        database.initialize()
+        runner = Runner(self.settings, database, None)
+        plan = self.settings.plans_root / "run-images.yaml"
+        log = self.settings.data_dir / "run-images.log"
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        plan.write_text("benchmarks: [terminal-bench]\n", encoding="utf-8")
+
+        def inspect(command, **kwargs):
+            return mock.Mock(returncode=1 if "harness-runtime" in command[-1] else 0)
+
+        with log.open("a") as stream, \
+                mock.patch("hbench_console.runner.subprocess.run", side_effect=inspect), \
+                mock.patch.object(runner, "_spawn", return_value=0) as spawn:
+            self.assertTrue(runner._ensure_images(plan, stream))
+        command = spawn.call_args[0][0]
+        self.assertIn("images", command)
+        self.assertIn("build", command)
+        self.assertIn("--execute", command)
+
+        with log.open("a") as stream, \
+                mock.patch("hbench_console.runner.subprocess.run",
+                           return_value=mock.Mock(returncode=0)), \
+                mock.patch.object(runner, "_spawn", return_value=0) as spawn:
+            self.assertTrue(runner._ensure_images(plan, stream))
+        spawn.assert_not_called()
+
     def test_interrupted_runs_are_marked_on_start(self):
         database = Database(self.settings.database)
         database.initialize()
@@ -792,6 +820,28 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(summary["networks"], 1)
         self.assertEqual(summary["volumes"], 1)
         self.assertTrue(any("container in use" in error for error in summary["errors"]))
+
+    def test_cleanup_covers_verifier_projects_and_init_containers(self):
+        calls = []
+
+        def fake(args):
+            calls.append(args)
+            if args[0] == "ps" and "name=^task-a__abc[_-]" in args:
+                return subprocess.CompletedProcess(args, 0, "init1\nmain1\n", "")
+            if args[:2] == ["volume", "ls"]:
+                return subprocess.CompletedProcess(args, 0, "v1\n", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with mock.patch.object(cleanup, "_engine", side_effect=fake):
+            summary = cleanup.cleanup_job(self.job)
+        self.assertEqual(summary["containers"], 2)
+        self.assertEqual(summary["volumes"], 1)
+        self.assertIn(["container", "rm", "-f", "init1", "main1"], calls)
+        for scope in ("task-a__abc__env", "task-a__abc__verifier__trial"):
+            self.assertIn(["volume", "ls", "-q", "--filter",
+                           f"label=com.docker.compose.project={scope}"], calls)
+            self.assertIn(["ps", "-aq", "--filter",
+                           f"label=com.docker.compose.project={scope}"], calls)
 
     def test_missing_job_directory_skips_the_engine(self):
         with mock.patch.object(cleanup, "_engine", side_effect=AssertionError("no call")):

@@ -44,6 +44,7 @@ from hbench.agents import (
     PI_MCP_EXTENSION,
     PI_MCP_VERSIONS,
     PI_VERSION,
+    VERSION_PROBE_TIMEOUT_SEC,
     AgentScopeJava,
     AgentScopeJavaOptions,
     FrozenCodex,
@@ -108,7 +109,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 self.environment.exec.return_value = result(stdout)
                 await agent.install(self.environment)
                 self.environment.exec.assert_awaited_once_with(
-                    command=agent.get_version_command(), timeout_sec=30
+                    command=agent.get_version_command(), timeout_sec=VERSION_PROBE_TIMEOUT_SEC
                 )
                 evidence = json.loads((self.logs / "version.json").read_text())
                 self.assertEqual(evidence["actual_version"], version)
@@ -116,6 +117,20 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(evidence["requested_version"], version)
                 self.assertFalse(any("npm" in command for command in self.commands()))
                 self.assertEqual(agent._version, version)
+
+    async def test_stalled_version_probe_is_retried_once(self):
+        self.environment.exec.side_effect = [
+            RuntimeError("Command timed out after 120 seconds"), result(PI_VERSION + "\n")]
+        await self.agent(FrozenPi).install(self.environment)
+        self.assertEqual(self.environment.exec.await_count, 2)
+
+    async def test_version_probe_fails_after_a_second_timeout(self):
+        self.environment.exec.side_effect = [
+            RuntimeError("Command timed out after 120 seconds"),
+            RuntimeError("Command timed out after 120 seconds")]
+        with self.assertRaises(RuntimeError):
+            await self.agent(FrozenPi).install(self.environment)
+        self.assertEqual(self.environment.exec.await_count, 2)
 
     async def test_explicit_pinned_versions_are_checked(self):
         for cls, version, stdout in (
