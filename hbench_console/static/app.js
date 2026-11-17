@@ -237,12 +237,13 @@ function comboTable(combos) {
     h("table", {},
       h("thead", {}, h("tr", {},
         ["Harness", "Model", "Dataset"].map(x => h("th", { text: x })),
-        ["计划", "记录", "缺失", "错误", "未评分", "通过", "通过率（计划）", "通过率（记录）",
+        ["计划", "记录", "已评分", "通过", "未通过", "异常", "运行中", "排队中", "未评分（无异常）", "缺失", "通过率（计划）", "通过率（记录）",
          "平均 reward", "输入 token", "输出 token"].map(x => h("th", { class: "num", text: x })))),
       h("tbody", {}, combos.map(c => h("tr", {},
         h("td", { text: c.agent }), h("td", { text: c.model }), h("td", { text: c.dataset }),
-        cell(c.planned), cell(c.recorded), cell(c.missing), cell(c.errors), cell(c.unscored),
-        cell(c.passed), cell(pct(c.pass_rate_planned)), cell(pct(c.pass_rate_recorded)),
+        cell(c.planned), cell(c.recorded), cell(c.scored), cell(c.passed), cell(c.failed),
+        cell(c.errors), cell(c.running), cell(c.queued), cell(c.unscored), cell(c.missing),
+        cell(pct(c.pass_rate_planned)), cell(pct(c.pass_rate_recorded)),
         cell(c.mean_reward_scored === null ? "—" : Number(c.mean_reward_scored).toFixed(3)),
         cell(tokens(c, "input_tokens")), cell(tokens(c, "output_tokens")))))));
 }
@@ -293,7 +294,7 @@ function trialsCard(job) {
   const results = h("div", {});
   const pager = h("div", { class: "pager" });
   const selects = {};
-  const OUTCOMES = [["passed", "通过"], ["failed", "失败"], ["error", "错误"], ["unscored", "未评分"]];
+  const OUTCOMES = [["passed", "通过"], ["failed", "未通过"], ["error", "异常"], ["unscored", "未评分（无异常）"]];
   const select = (label, key, options) => {
     const node = h("select", { onchange: (event) => { filter[key] = event.target.value; filter.offset = 0; load(); } },
       h("option", { value: "", text: label }));
@@ -317,10 +318,10 @@ function trialsCard(job) {
     try {
       const data = await api(`/api/jobs/${encodeURIComponent(job.name)}/trials?${params}`);
       const rows = data.trials.map(t => {
-        const outcome = t.error ? badge(t.error_label || "错误", "bad")
+        const outcome = t.error ? badge(t.error_label || "异常", "bad")
           : t.reward === 1 ? badge("通过", "ok")
           : t.reward === null || t.reward === undefined ? badge("未评分", "warn")
-          : badge("失败", "bad");
+          : badge("未通过", "bad");
         return h("tr", {},
           h("td", { text: t.task || "—" }),
           h("td", { text: t.trial }),
@@ -372,8 +373,8 @@ function missingCard(job) {
   if (!total) return null;
   const body = h("div", {});
   const details = h("details", {},
-    h("summary", { text: `未运行 trial：${num(total)}（展开逐题明细）` }),
-    h("p", { class: "muted", text: "缺失 = job 计划 - 已记录 trial。用于定位调度取消、地址池耗尽或任务未启动。" }),
+    h("summary", { text: `缺失结果：${num(total)}（展开逐题明细）` }),
+    h("p", { class: "muted", text: "缺失指作业结束后仍未生成结果的 trial；运行中和排队中的任务不计入缺失。" }),
     body);
   let loaded = false;
   details.addEventListener("toggle", async () => {
@@ -410,10 +411,7 @@ async function renderJob(name) {
   };
   const sections = datasetsOf(job.combos).map(dataset =>
     heatSection(dataset, job.combos.filter(c => c.dataset === dataset), pick));
-  const totalPlanned = job.combos.reduce((sum, c) => sum + (c.planned || 0), 0);
-  const totalPassed = job.combos.reduce((sum, c) => sum + (c.passed || 0), 0);
-  const totalErrors = job.combos.reduce((sum, c) => sum + (c.errors || 0), 0);
-  const totalMissing = job.combos.reduce((sum, c) => sum + (c.missing || 0), 0);
+  const counts = job.counts;
 
   fill(app, 
     job.fixture ? fixtureBanner() : null,
@@ -427,12 +425,17 @@ async function renderJob(name) {
     h("div", { class: "card" },
       h("div", { class: "stats" },
         stat("记录 / 计划", `${num(job.recorded_trials)} / ${num(job.planned_trials)}`),
-        stat("通过 / 计划", `${num(totalPassed)} / ${num(totalPlanned)}`),
+        stat("已评分", num(counts.scored)),
+        stat("通过", num(counts.passed)),
+        stat("未通过", num(counts.failed)),
+        stat("异常", num(counts.errors)),
+        stat("运行中", num(counts.running)),
+        stat("排队中", num(counts.queued)),
+        stat("未评分（无异常）", num(counts.unscored)),
+        stat("缺失", num(counts.missing)),
         stat("通过率（计划）", pct(job.pass_rate_planned)),
-        stat("错误 trial", num(totalErrors)),
-        stat("缺失 trial", num(totalMissing)),
         stat("组合数", num(job.combos.length))),
-      h("p", { class: "muted", text: job.note || "" }),
+      h("p", { class: "muted", text: "已评分 = 通过 + 未通过。异常与未评分（无异常）分别统计；运行中、排队中不计入缺失。" }),
       h("p", { class: "muted" }, "证据目录：", h("code", { text: job.path })),
       job.error ? h("p", { class: "error", text: `索引错误：${job.error}` }) : null),
     job.status === "running" ? h("div", { class: "card" },

@@ -1,4 +1,5 @@
 """Scan Harbor job directories, summarize them with hbench and index the result."""
+from collections import Counter
 from datetime import datetime, timezone
 from itertools import islice
 import json
@@ -9,7 +10,7 @@ import subprocess
 import threading
 import uuid
 
-from hbench.summary import DIAGNOSTICS_VERSION
+from hbench.summary import DIAGNOSTICS_VERSION, aggregate
 
 from .config import Settings
 from .db import Database, now
@@ -117,6 +118,12 @@ def _missing_trials(job_dir: Path, summary: dict) -> list[dict]:
         return []
     remaining = {}
     for key in planned:
+        dataset, task, agent, model = key
+        matches = {g["model"] for g in summary.get("groups", [])
+                   if g["dataset"] == dataset and g["agent"] == agent
+                   and (model == g["model"] or model.endswith("/" + g["model"]))}
+        if len(matches) == 1:
+            key = (dataset, task, agent, matches.pop())
         remaining[key] = remaining.get(key, 0) + 1
     for trial in summary.get("trials", []):
         key = (trial.get("dataset") or "adhoc", trial.get("task"),
@@ -282,7 +289,8 @@ class Ingestor:
         try:
             # A running job has config.json (and usually lock.json) but no result.json yet.
             # Index it with zero recorded trials so the console shows it before completion.
-            if (job_dir / "config.json").is_file() and not (job_dir / "result.json").is_file():
+            if ((job_dir / "config.json").is_file() and not (job_dir / "result.json").is_file()
+                    and not any(job_dir.glob("*/result.json"))):
                 return self._ingest_running(job_dir)
             if self._needs_refresh(job_dir, report):
                 self._summarize(job_dir, report)
@@ -310,6 +318,13 @@ class Ingestor:
             "pass_rate_planned": None,
             "note": "Job is running; no trial results yet.",
         }
+        try:
+            trials = _planned_trials(job_dir)
+            if trials:
+                expected = Counter((agent, model, dataset) for dataset, _, agent, model in trials)
+                summary.update(aggregate([], expected=expected))
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
         self._store(name, job_dir, summary)
         return {"name": name, "status": "running", "recorded_trials": 0}
 

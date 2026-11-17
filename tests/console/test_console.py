@@ -20,6 +20,7 @@ from hbench_console.db import Database, SCHEMA
 from hbench_console.diagnosis import diagnose
 from hbench_console.ingest import Ingestor, _evidence_links
 from hbench_console.runner import Runner, RunnerError
+from hbench.summary import aggregate
 
 FAKE = r'''
 import json, os, sys, time
@@ -459,6 +460,87 @@ class IngestTests(ConsoleFixture):
         Ingestor(settings, database).sync()
         client, _ = self.client(settings)
         self.assertEqual(client.get(f"/api/jobs/{name}").json()["status"], "indexed")
+
+    def test_live_results_distinguish_scored_errors_running_and_queued(self):
+        client, app = self.client()
+        name = "live-results"
+        job_dir = self.settings.jobs_root / name
+        job_dir.mkdir(parents=True)
+        agent = {"import_path": "hbench.agents:FrozenPi", "model_name": "openai/model"}
+        (job_dir / "config.json").write_text(json.dumps({
+            "agents": [agent], "datasets": [{"path": "/data/terminal-bench",
+                "task_names": [f"task-{i}" for i in range(20)]}]}))
+        (job_dir / "result.json").write_text(json.dumps({"finished_at": None,
+            "stats": {"n_completed_trials": 19, "n_running_trials": 1}}))
+        rows, trials = [], []
+        for i in range(20):
+            folder = job_dir / f"task-{i}__trial"
+            folder.mkdir()
+            (folder / "config.json").write_text(json.dumps({"agent": agent,
+                "task": {"path": f"/data/terminal-bench/task-{i}", "source": "terminal-bench"}}))
+            if i == 19:
+                continue
+            error = "ExampleError" if i >= 16 else None
+            reward = None if error else int(i == 0)
+            row = {"id": str(i), "agent_info": {"name": "pi", "model_info": {"name": "model"}},
+                   "source": "terminal-bench", "verifier_result": {"rewards": {"reward": reward}},
+                   "exception_info": {"exception_type": error} if error else None}
+            rows.append(row)
+            (folder / "result.json").write_text(json.dumps(row))
+            trials.append({"trial": folder.name, "task": f"task-{i}", "agent": "pi",
+                           "model": "model", "dataset": "terminal-bench", "reward": reward, "error": error})
+        summary = aggregate(rows, expected={("pi", "model", "terminal-bench"): 20})
+        summary["trials"] = trials
+        database = Database(self.settings.database)
+        Ingestor(self.settings, database)._store(name, job_dir, summary)
+        job = client.get(f"/api/jobs/{name}").json()
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["counts"], {"scored": 16, "passed": 1, "failed": 15,
+            "errors": 3, "unscored": 0, "running": 1, "queued": 0, "missing": 0})
+        self.assertEqual(job["combos"][0]["mean_reward_scored"], 1 / 16)
+        self.assertEqual(client.get(f"/api/jobs/{name}/missing").json()["total"], 0)
+        self.assertEqual(client.get("/api/jobs").json()["jobs"][0]["status"], "running")
+        compared = client.get(f"/api/compare?jobs={name}").json()["jobs"][0]["combos"][0]
+        self.assertEqual((compared["running"], compared["missing"]), (1, 0))
+
+        # Not yet started is queued, not running or missing.
+        shutil.rmtree(job_dir / "task-19__trial")
+        counts = client.get(f"/api/jobs/{name}").json()["counts"]
+        self.assertEqual((counts["running"], counts["queued"], counts["missing"]), (0, 1, 0))
+
+        # A terminal run overrides an unfinished Harbor snapshot.
+        database.create_run(name, "name: live-results", False)
+        database.update_run(name, status="cancelled")
+        job = client.get(f"/api/jobs/{name}").json()
+        self.assertEqual(job["status"], "indexed")
+        self.assertEqual((job["counts"]["running"], job["counts"]["queued"], job["counts"]["missing"]), (0, 0, 1))
+        missing = client.get(f"/api/jobs/{name}/missing").json()
+        self.assertEqual(missing["total"], 1)
+        self.assertEqual(missing["missing"][0]["task"], "task-19")
+
+    def test_initial_plan_has_running_and_queued_counts_per_combination(self):
+        client, _ = self.client()
+        job_dir = self.settings.jobs_root / "initial"
+        job_dir.mkdir(parents=True)
+        agents = [{"name": "pi", "model_name": model} for model in ("a", "b")]
+        (job_dir / "config.json").write_text(json.dumps({"agents": agents,
+            "datasets": [{"path": "/data/bench", "task_names": ["task"],}], "n_attempts": 60}))
+        for i in range(60):
+            folder = job_dir / f"task__{i}"
+            folder.mkdir()
+            (folder / "config.json").write_text(json.dumps({"agent": agents[0],
+                "task": {"path": "/data/bench/task", "source": "bench"}}))
+        database = Database(self.settings.database)
+        Ingestor(self.settings, database)._ingest(job_dir)
+        job = client.get("/api/jobs/initial").json()
+        self.assertEqual(job["planned_trials"], 120)
+        self.assertEqual([(g["running"], g["queued"], g["missing"]) for g in job["combos"]],
+                         [(60, 0, 0), (0, 60, 0)])
+        self.assertEqual(len(job["progress"]["active"]), 50)
+        # Stale trial directories must not remain running after completion.
+        (job_dir / "result.json").write_text(json.dumps({"finished_at": "2026-11-17T08:00:00Z"}))
+        job = client.get("/api/jobs/initial").json()
+        self.assertEqual((job["counts"]["running"], job["counts"]["missing"]), (0, 120))
 
 
 class MultiStepEvidenceTests(ConsoleFixture):

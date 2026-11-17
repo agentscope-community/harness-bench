@@ -24,6 +24,7 @@ from .diagnosis import diagnose
 from .ingest import Ingestor
 from .progress import scan_job
 from .runner import NAME, Runner
+from .statistics import job_statistics, job_status
 
 ACTIVE_RUNS = {"planning", "running", "summarizing", "archiving"}
 MATRIX_KEYS = {"name", "cluster", "dataset_root", "benchmarks", "models", "harnesses",
@@ -431,37 +432,27 @@ def create_app(settings: Settings, console: Console | None = None,
     def sync_jobs():
         return {"results": state.ingestor.sync(), "last": state.ingestor.last_sync}
 
-    def _job_status(path: str) -> str:
-        try:
-            job_path = Path(path)
-        except (OSError, ValueError):
-            return "unknown"
-        if (job_path / "result.json").is_file():
-            return "indexed"
-        if (job_path / "config.json").is_file():
-            return "running"
-        return "unknown"
+    def _job_snapshot(name: str):
+        job = state.database.get_job(name)
+        if job is None:
+            raise HTTPException(404, "作业不存在")
+        return job_statistics(job, state.database.get_run(name))
 
     @app.get("/api/jobs")
     def list_jobs():
         jobs = state.database.list_jobs()
         for job in jobs:
-            job["status"] = _job_status(job["path"])
+            job["status"] = job_status(job["path"], state.database.get_run(job["name"]))
         return {"jobs": jobs,
                 "sync": {"last": state.ingestor.last_sync, "error": state.ingestor.last_error}}
 
     @app.get("/api/jobs/{name}")
     def get_job(name: str):
-        job = state.database.get_job(name)
-        if job is None:
-            raise HTTPException(404, "作业不存在")
-        job["status"] = _job_status(job["path"])
+        job = _job_snapshot(name)
         job["agents"] = sorted({c["agent"] for c in job["combos"]})
         job["models"] = sorted({c["model"] for c in job["combos"]})
         job["datasets"] = sorted({c["dataset"] for c in job["combos"]})
         job["run"] = state.database.has_run(name)
-        if job["status"] == "running":
-            job["progress"] = scan_job(Path(job["path"]), job.get("planned_trials"), None, True)
         return job
 
     @app.get("/api/jobs/{name}/trials")
@@ -477,11 +468,11 @@ def create_app(settings: Settings, console: Console | None = None,
 
     @app.get("/api/jobs/{name}/missing")
     def missing_trials(name: str, limit: int = 2000):
-        if state.database.get_job(name) is None:
-            raise HTTPException(404, "作业不存在")
-        total, rows = state.database.missing_trials(name, max(1, min(limit, 10000)))
+        job = _job_snapshot(name)
+        total, rows = (0, []) if job["status"] == "running" else state.database.missing_trials(
+            name, max(1, min(limit, 10000)))
         return {"total": total, "missing": rows,
-                "note": "缺失由 job 的 config/lock 与已记录 trial 求差集得到；"
+                "note": "缺失指已结束作业中未生成结果的 trial；运行中和排队中的 trial 不计入缺失。"
                         "若作业使用整库或 glob，无法逐题枚举，只能看组合汇总的计数。"}
 
     @app.get("/api/jobs/{name}/tasks")
@@ -497,9 +488,7 @@ def create_app(settings: Settings, console: Console | None = None,
             raise HTTPException(422, "至少选择一个作业")
         result = []
         for name in names:
-            job = state.database.get_job(name)
-            if job is None:
-                raise HTTPException(404, f"作业不存在: {name}")
+            job = _job_snapshot(name)
             result.append({"job": name, "fixture": job["fixture"], "combos": job["combos"]})
         return {"jobs": result}
 
