@@ -1,0 +1,8 @@
+name: ${HB_ANTHROPIC_MODEL_ID:-qwen3.8-max}
+base_url: ${HB_ANTHROPIC_BASE_URL}
+api_key_name: HB_BAILIAN_API_KEY
+skip_model_parsing: true
+api_formats:
+  claude-code: anthropic_messages
+  hermes: anthropic_messages
+  openclaw: anthropic_messages

@@ -318,7 +318,7 @@ class DockerTests(DockerFixture, unittest.TestCase):
         values += [add_setup_gate({"name": "main", "args": ["serve"]}, 30, agent_user=user, agent_home=home)
                    for user, home in ((None, None), ("agent", None), (1000, "/home/custom"))]
         self.assertEqual(hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest(),
-                         "7c4f00c93fb0a6b379ce7de523757ee42cc195f1439516573f98520c9cdc5d6a")
+                         "62c1cd399a45a8bfa66ea73886097895ab353208e3ccab2f6de45803d878aed4")
 
     def test_init_copy_script_offline_alias_contents_and_idempotence(self):
         script = self.make_env()._prepare_runtime_overlay()["services"]["hbench-runtime-init"]["command"][0]

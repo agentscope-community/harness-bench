@@ -1,5 +1,6 @@
 """Native Harbor adapters using the prebuilt extended runtime."""
 import json
+from harbor.agents.installed.claude_code import ClaudeCode
 
 from harbor.agents.installed.hermes import Hermes
 from harbor.agents.installed.openclaw import OpenClaw
@@ -33,6 +34,10 @@ class FrozenNative:
     async def run(self, instruction, environment, context):
         record_request(self, self.render_instruction(instruction))
         await super().run(instruction, environment, context)
+
+
+class FrozenClaudeCode(FrozenNative, ClaudeCode):
+    pass
 
 
 class FrozenHermes(FrozenNative, Hermes):

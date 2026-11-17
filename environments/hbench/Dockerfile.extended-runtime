@@ -7,12 +7,12 @@ RUN rm -rf /usr/local/lib/node_modules/npm
 COPY --from=node24 /usr/local/bin/node /usr/local/bin/node
 COPY --from=node24 /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 COPY configs/harnesses /tmp/harness-profiles
-RUN npm install -g openclaw@2026.11.4
+RUN npm install -g @anthropic-ai/claude-code@2.1.325 openclaw@2026.11.4
 ENV UV_PYTHON_INSTALL_DIR=/opt/hbench-runtime/extensions/python
 RUN mkdir -p /opt/hbench-runtime/extensions/bin \
     && uv python install 3.12 \
     && uv venv --python 3.12 /opt/hbench-runtime/extensions/hermes \
     && uv pip install --python /opt/hbench-runtime/extensions/hermes/bin/python \
-       'git+https://github.com/NousResearch/hermes-agent.git@f97608f178d1ffeca59860195ab7da295f7c8e5f' \
+       'https://github.com/NousResearch/hermes-agent/archive/f97608f178d1ffeca59860195ab7da295f7c8e5f.tar.gz' \
     && ln -s /opt/hbench-runtime/extensions/hermes/bin/hermes /opt/hbench-runtime/extensions/bin/hermes
-RUN uv run --with pyyaml python -c 'import json; from pathlib import Path; import yaml; p=Path("/tmp/harness-profiles"); names=("hermes","openclaw"); Path("/opt/hbench-runtime/extensions/versions.json").write_text(json.dumps({n:yaml.safe_load((p/(n+".yaml")).read_text())["kwargs"]["version"] for n in names}))'
+RUN uv run --with pyyaml python -c 'import json; from pathlib import Path; import yaml; p=Path("/tmp/harness-profiles"); names=("claude-code","hermes","openclaw"); Path("/opt/hbench-runtime/extensions/versions.json").write_text(json.dumps({n:yaml.safe_load((p/(n+".yaml")).read_text())["kwargs"]["version"] for n in names}))'
