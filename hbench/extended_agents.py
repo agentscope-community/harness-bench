@@ -51,7 +51,7 @@ class FrozenHermes(FrozenNative, Hermes):
 
 class FrozenOpenClaw(FrozenNative, OpenClaw):
     # Benchmark containers have no personal memory or embedding service.
-    _DEFAULT_CONFIG = {"agents": {"defaults": {"memorySearch": {"enabled": False}}}}
+    _DEFAULT_CONFIG = {"memory": {"search": {"enabled": False}}}
     API_MODES = {
         ModelApiFormat.OPENAI_CHAT_COMPLETIONS: "openai-completions",
         ModelApiFormat.OPENAI_RESPONSES: "openai-responses",
