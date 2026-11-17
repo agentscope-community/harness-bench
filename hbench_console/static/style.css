@@ -104,3 +104,17 @@ pre.log {
 .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0 12px; }
 .error { color: var(--bad); white-space: pre-wrap; }
 .empty { padding: 32px; text-align: center; color: var(--muted); }
+.progress-wrap { display: flex; gap: 8px; align-items: center; min-width: 150px; }
+.progress {
+  flex: 1; height: 10px; min-width: 100px; border-radius: 999px; overflow: hidden;
+  background: #e5e7eb;
+}
+.progress-fill { height: 100%; background: var(--accent); transition: width .4s ease; }
+.progress-text { font-size: 12px; color: var(--muted); min-width: 46px; text-align: right;
+  font-variant-numeric: tabular-nums; }
+.progress-stats .stats { margin-top: 12px; }
+.checkgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 8px 0; }
+.checkgroup { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+.checks { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; }
+.check { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+details.card > summary { cursor: pointer; color: var(--muted); }

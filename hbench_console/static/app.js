@@ -37,6 +37,50 @@ const pct = v => (v === null || v === undefined) ? "—" : `${(v * 100).toFixed(
 const num = v => (v === null || v === undefined) ? "—" : Number(v).toLocaleString("zh-CN");
 const clock = s => s ? new Date(s).toLocaleString("zh-CN", { hour12: false }) : "—";
 const heatColor = p => p === null || p === undefined ? null : `hsl(${Math.round(120 * Math.max(0, Math.min(1, p)))} 62% 40%)`;
+const dur = s => {
+  if (s === null || s === undefined) return "—";
+  s = Math.max(0, Math.round(s));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d) return `${d} 天 ${h} 小时`;
+  if (h) return `${h} 小时 ${m} 分`;
+  if (m) return `${m} 分 ${s % 60} 秒`;
+  return `${s} 秒`;
+};
+
+function progressBar(progress) {
+  const percent = progress && progress.percent !== null && progress.percent !== undefined
+    ? Math.max(0, Math.min(100, progress.percent)) : 0;
+  const fill = h("div", { class: "progress-fill" });
+  fill.style.width = `${percent}%`;
+  return h("div", { class: "progress-wrap" },
+    h("div", { class: "progress", role: "progressbar", "aria-valuenow": String(percent),
+      "aria-valuemin": "0", "aria-valuemax": "100" }, fill),
+    h("span", { class: "progress-text",
+      text: progress && progress.percent !== null && progress.percent !== undefined
+        ? `${percent.toFixed(1)}%` : "—" }));
+}
+
+function progressSummary(progress) {
+  if (!progress) return h("p", { class: "muted", text: "尚无进度数据：计划生成后才会创建 job 目录。" });
+  return h("div", { class: "progress-stats" },
+    progressBar(progress),
+    h("div", { class: "stats" },
+      stat("已记录 / 计划", `${num(progress.recorded)} / ${num(progress.planned)}`),
+      stat("运行中", num(progress.running)),
+      stat("排队", num(progress.queued)),
+      stat("已用时间", dur(progress.elapsed_sec)),
+      stat("每小时", progress.rate_per_hour === null ? "—" : `${num(progress.rate_per_hour)} trial`),
+      stat("预计剩余", progress.eta_sec === null ? "—" : dur(progress.eta_sec))));
+}
+
+function activeTable(active) {
+  if (!active || !active.length) return h("p", { class: "muted", text: "当前没有正在执行的 trial。" });
+  return h("div", { class: "table-wrap" }, h("table", {},
+    h("thead", {}, h("tr", {}, ["运行中的 trial", "任务", "开始时间"].map(x => h("th", { text: x })))),
+    h("tbody", {}, active.map(item => h("tr", {},
+      h("td", { text: item.trial }), h("td", { text: item.task }), h("td", { text: clock(item.started_at) }))))));
+}
+
 
 function fill(node, ...children) {
   node.replaceChildren(...children.flat(Infinity)
@@ -378,6 +422,7 @@ async function renderJob(name) {
       h("div", { class: "row" },
         link(`#/jobs/${encodeURIComponent(name)}/tasks`, "逐题对比"),
         link(`#/compare?jobs=${encodeURIComponent(name)}`, "与其他作业对比"),
+        job.run ? link(`#/runs/${encodeURIComponent(name)}`, "运行详情") : null,
         link("#/jobs", "返回列表"))),
     h("div", { class: "card" },
       h("div", { class: "stats" },
@@ -390,11 +435,25 @@ async function renderJob(name) {
       h("p", { class: "muted", text: job.note || "" }),
       h("p", { class: "muted" }, "证据目录：", h("code", { text: job.path })),
       job.error ? h("p", { class: "error", text: `索引错误：${job.error}` }) : null),
+    job.status === "running" ? h("div", { class: "card" },
+      h("h2", { text: "实时进度" }),
+      progressSummary(job.progress || null),
+      h("h3", { text: "运行中的 trial" }),
+      activeTable(job.progress ? job.progress.active : []),
+      h("p", { class: "muted", text: "外部启动的作业只读展示；从控制台发起的运行可在运行详情中取消。" })) : null,
     ...sections,
     h("div", { class: "card" }, h("h2", { text: "组合汇总" }), comboTable(job.combos)),
     missingCard(job),
     trials.node,
   );
+  if (job.status === "running") {
+    const timer = setTimeout(() => {
+      if (location.hash === `#/jobs/${encodeURIComponent(name)}`) {
+        renderJob(name).catch(error => fill(app, errorBox(error)));
+      }
+    }, 10000);
+    window.addEventListener("hashchange", () => clearTimeout(timer), { once: true });
+  }
 }
 
 async function renderTasks(name) {
@@ -504,34 +563,52 @@ async function renderCompare() {
 // --------------------------------------------------------------------- runs
 async function renderRuns() {
   const data = await api("/api/runs");
+  const cancelRun = async (name) => {
+    if (!confirm(`停止 ${name}？会终止 Harbor 进程组并清理该运行占用的容器、网络与卷，已完成的 trial 结果保留。`)) return;
+    try { await api(`/api/runs/${encodeURIComponent(name)}/cancel`, { method: "POST" }); }
+    catch (error) { alert(error.message); return; }
+    await renderRuns();
+  };
   const rows = data.runs.map(run => h("tr", {},
     h("td", {}, link(`#/runs/${encodeURIComponent(run.name)}`, run.name)),
     h("td", {}, statusBadge(run.status)),
     h("td", { text: run.dry_run ? "演练" : "真实" }),
-    h("td", { class: "num", text: num(run.planned_trials) }),
+    h("td", { class: "num" }, run.progress ? progressBar(run.progress) : "—"),
+    h("td", { class: "num", text: run.progress
+      ? `${num(run.progress.recorded)} / ${num(run.progress.planned)}（运行 ${num(run.progress.running)}）`
+      : num(run.planned_trials) }),
     h("td", { text: clock(run.created_at) }),
     h("td", { text: run.finished_at ? clock(run.finished_at) : "—" }),
     h("td", { class: "muted", text: run.error || "" }),
     h("td", {}, ACTIVE.has(run.status) ? h("button", { class: "danger", text: "取消",
-      onclick: async () => { try { await api(`/api/runs/${encodeURIComponent(run.name)}/cancel`, { method: "POST" }); route(); } catch (error) { alert(error.message); } } }) : "")));
-  fill(app, 
+      onclick: () => cancelRun(run.name) }) : "")));
+  fill(app,
     h("div", { class: "spread" }, h("h1", { text: "运行" }),
       h("div", { class: "row" }, h("a", { class: "button primary", href: "#/runs/new", text: "新建运行" }), link("#/jobs", "查看结果"))),
+    h("p", { class: "muted", text: "运行中的作业每 5 秒自动刷新；点击名称查看逐 trial 进度和取消入口。" }),
     data.runs.length ? h("div", { class: "table-wrap" }, h("table", {},
-      h("thead", {}, h("tr", {}, ["名称", "状态", "模式", "计划 trial", "创建", "结束", "错误", ""].map(x => h("th", { text: x })))),
+      h("thead", {}, h("tr", {}, ["名称", "状态", "模式", "进度", "Trial", "创建", "结束", "错误", ""].map(x => h("th", { text: x })))),
       h("tbody", {}, rows)))
       : h("div", { class: "card empty", text: "还没有运行记录。" }),
   );
+  if (data.runs.some(run => ACTIVE.has(run.status))) {
+    const timer = setTimeout(() => {
+      if (location.hash === "#/runs") renderRuns().catch(error => fill(app, errorBox(error)));
+    }, 5000);
+    window.addEventListener("hashchange", () => clearTimeout(timer), { once: true });
+  }
 }
 
 async function renderRun(name) {
   let offset = 0;
   const timer = { id: null };
   const statsBox = h("div", { class: "stats" });
+  const progressBox = h("div", { class: "muted", text: "等待计划生成…" });
+  const activeBox = h("div", {});
   const log = h("pre", { class: "log", text: "" });
   const cancel = h("button", { class: "danger", text: "取消运行", style: "display:none",
     onclick: async () => {
-      if (!confirm("取消会向 Harbor 进程组发送 SIGTERM，确定继续？")) return;
+      if (!confirm("取消会终止 Harbor 进程组并清理该运行占用的容器、网络与卷，确定继续？")) return;
       try { await api(`/api/runs/${encodeURIComponent(name)}/cancel`, { method: "POST" }); }
       catch (error) { alert(error.message); }
     } });
@@ -541,6 +618,8 @@ async function renderRun(name) {
       h("h1", {}, name, " ", h("span", { id: "run-status" })),
       h("div", { class: "row" }, link("#/runs", "返回运行列表"), cancel)),
     h("div", { class: "card" }, statsBox),
+    h("div", { class: "card" }, h("h2", { text: "实时进度" }), progressBox,
+      h("h3", { text: "运行中的 trial" }), activeBox),
     h("div", { class: "card" }, h("h2", { text: "日志" }), log));
 
   async function refresh() {
@@ -553,9 +632,15 @@ async function renderRun(name) {
         stat("状态", (STATUS[run.status] || [run.status])[0]),
         stat("模式", run.dry_run ? "演练（无模型调用）" : "真实"),
         stat("计划 trial", num(run.planned_trials)),
+        stat("已记录", run.progress ? num(run.progress.recorded) : "—"),
+        stat("运行中", run.progress ? num(run.progress.running) : "—"),
         stat("创建", clock(run.created_at)),
         stat("结束", run.finished_at ? clock(run.finished_at) : "—"));
       if (run.error) statsBox.append(h("p", { class: "error", text: run.error }));
+      progressBox.replaceChildren(run.progress
+        ? progressSummary(run.progress)
+        : h("p", { class: "muted", text: "job 目录尚未创建；计划渲染完成后开始统计。" }));
+      activeBox.replaceChildren(activeTable(run.progress ? run.progress.active : []));
       if (run.log_path) {
         const chunk = await api(`/api/runs/${encodeURIComponent(name)}/log?offset=${offset}`);
         if (chunk.text) { log.textContent += chunk.text; log.scrollTop = log.scrollHeight; }
@@ -588,79 +673,120 @@ function stamp() {
 
 async function renderNewRun() {
   const catalogData = await loadCatalog(true);
-  let defaultMatrix = "";
-  try { defaultMatrix = (await api("/api/matrices/bailian-18")).yaml; }
-  catch { defaultMatrix = "# 输入矩阵 YAML，字段与 configs/matrices/*.yaml 一致\n"; }
+  let matrixInfo = { yaml: "# 输入矩阵 YAML，字段与 configs/matrices/*.yaml 一致\n", fields: {} };
+  try { matrixInfo = await api("/api/matrices/bailian-18"); } catch { /* keep fallback */ }
+  const fields = matrixInfo.fields || {};
+  const options = {
+    benchmarks: (fields.benchmarks || catalogData.benchmarks || []).slice(),
+    harnesses: (fields.harnesses || catalogData.harnesses || []).slice(),
+    models: (fields.models || (catalogData.models || []).map(m => m.profile)).slice(),
+  };
+  const selected = {
+    benchmarks: new Set(options.benchmarks),
+    harnesses: new Set(options.harnesses),
+    models: new Set(options.models),
+  };
 
-  const matrix = h("textarea", { spellcheck: "false", text: defaultMatrix });
+  const matrix = h("textarea", { spellcheck: "false", text: matrixInfo.yaml });
   const name = h("input", { value: `console-${stamp()}`, size: 28 });
-  const cluster = h("select", {}, h("option", { value: "", text: "矩阵默认" }),
-    catalogData.clusters.map(c => h("option", { value: c, text: c })));
   const concurrency = h("input", { type: "number", min: 1, placeholder: "矩阵默认" });
   const attempts = h("input", { type: "number", min: 1, placeholder: "矩阵默认" });
   const nTasks = h("input", { type: "number", min: 1, placeholder: "全量" });
   const tasks = h("input", { placeholder: "逗号分隔的题目目录名，可空", size: 32 });
-  const dryRun = h("input", { type: "checkbox", checked: true });
+  const dryRun = h("input", { type: "checkbox", checked: !catalogData.allow_real_runs });
   if (!catalogData.allow_real_runs) dryRun.disabled = true;
   const preview = h("div", { class: "muted", text: "尚未预览。预览只渲染计划，不调用模型。" });
   const message = h("div", {});
 
+  const pickGroup = (title, key, label) => h("div", { class: "checkgroup" },
+    h("div", { class: "spread" }, h("strong", { text: title }),
+      h("span", { class: "muted", text: `${selected[key].size} / ${options[key].length}` })),
+    h("div", { class: "checks" }, options[key].map(option => {
+      const box = h("input", { type: "checkbox", checked: selected[key].has(option),
+        onchange: (event) => {
+          if (event.target.checked) selected[key].add(option); else selected[key].delete(option);
+          event.target.closest(".checkgroup").querySelector(".muted").textContent =
+            `${selected[key].size} / ${options[key].length}`;
+        } });
+      return h("label", { class: "check" }, box, option);
+    })));
+
   function overrides() {
-    const value = {};
-    if (cluster.value) value.cluster = cluster.value;
+    const value = { cluster: "docker" };
     if (concurrency.value) value.concurrency = Number(concurrency.value);
     if (attempts.value) value.attempts = Number(attempts.value);
     if (nTasks.value) value.n_tasks = Number(nTasks.value);
     if (tasks.value.trim()) value.tasks = tasks.value;
+    for (const key of ["benchmarks", "harnesses", "models"]) {
+      if (!selected[key].size) return null;
+      value[key] = [...selected[key]];
+    }
     return value;
   }
 
   const previewButton = h("button", { text: "预览计划", onclick: async () => {
+    const body = overrides();
+    if (!body) {
+      preview.replaceChildren(errorBox(new Error("至少选择一个数据集、harness 和模型")));
+      return;
+    }
     previewButton.disabled = true;
     preview.textContent = "渲染中…";
-    preview.className = "muted";
     try {
       const data = await api("/api/runs/preview", { method: "POST",
-        body: JSON.stringify({ matrix: matrix.value, overrides: overrides() }) });
+        body: JSON.stringify({ matrix: matrix.value, overrides: body }) });
       preview.replaceChildren(
         h("div", {}, "计划 trial：", h("strong", { text: num(data.planned_trials) }), "；组合：",
           h("strong", { text: num((data.combinations || []).length) }), "；后端：",
-          h("strong", { text: data.backend || "—" }), "。" ),
-        h("div", { class: "muted", text: "计划不执行；真实运行的耗时与费用取决于模型和并发。" }));
+          h("strong", { text: data.backend || "docker" }), "。" ),
+        h("div", { class: "muted", text: `范围：${selected.benchmarks.size} 个数据集 × ${selected.harnesses.size} 个 harness × ${selected.models.size} 个模型。` }));
     } catch (error) { preview.replaceChildren(errorBox(error)); }
     finally { previewButton.disabled = false; }
   } });
 
   const startButton = h("button", { class: "primary", text: "启动", onclick: async () => {
     message.replaceChildren();
+    const body = overrides();
+    if (!body) {
+      message.replaceChildren(errorBox(new Error("至少选择一个数据集、harness 和模型")));
+      return;
+    }
     if (!dryRun.checked && !confirm("这是真实运行，会调用付费模型。确定启动？")) return;
     startButton.disabled = true;
     try {
       await api("/api/runs", { method: "POST", body: JSON.stringify({
-        matrix: matrix.value, name: name.value.trim(), dry_run: dryRun.checked, overrides: overrides() }) });
+        matrix: matrix.value, name: name.value.trim(), dry_run: dryRun.checked, overrides: body }) });
       location.hash = `#/runs/${encodeURIComponent(name.value.trim())}`;
     } catch (error) { message.replaceChildren(errorBox(error)); startButton.disabled = false; }
   } });
 
-  fill(app, 
+  fill(app,
     h("div", { class: "spread" }, h("h1", { text: "新建运行" }), link("#/runs", "返回运行列表")),
     h("div", { class: "card" },
       h("p", { class: "muted", text: catalogData.allow_real_runs
-        ? "当前允许真实运行。真实运行会调用百炼模型并产生费用。"
+        ? "当前允许真实运行。默认真实执行；勾选演练模式可只验证计划而不调用模型。"
         : "当前仅演练模式：可以完整验证计划渲染和调度，但不会调用模型。管理员设置 CONSOLE_ALLOW_REAL_RUNS=1 后才能真实运行。" }),
       h("div", { class: "grid-form" },
         h("label", { class: "field" }, "运行名称", name),
-        h("label", { class: "field" }, "执行后端", cluster),
         h("label", { class: "field" }, "并发", concurrency),
         h("label", { class: "field" }, "Attempts", attempts),
         h("label", { class: "field" }, "每数据集题数", nTasks),
         h("label", { class: "field" }, "指定题目", tasks)),
+      h("p", { class: "muted" }, "执行后端：", badge("docker", "ok"),
+        " 当前 ECS 本机 Docker；不再提供后端选择。"),
+      h("h3", { text: "实际运行范围" }),
+      h("div", { class: "checkgrid" },
+        pickGroup("数据集", "benchmarks"), pickGroup("Harness", "harnesses"),
+        pickGroup("模型", "models")),
       h("label", { class: "row" }, dryRun, "演练模式（--dry-run，不调用模型）"),
-      h("h3", { text: "矩阵 YAML" }),
-      matrix,
+      h("p", { class: "muted", text: "只调整题目数量或目录名时用上面的字段；范围勾选会覆盖矩阵 YAML 中的对应列表。" }),
       h("div", { class: "toolbar" }, previewButton, startButton),
       preview,
       message),
+    h("details", { class: "card" },
+      h("summary", { text: "高级：矩阵 YAML（可选）" }),
+      h("p", { class: "muted", text: "保留完整矩阵文件；上方勾选与字段会作为 overrides 叠加。" }),
+      matrix),
     h("div", { class: "card" },
       h("h2", { text: "模型凭证状态" }),
       h("p", { class: "muted", text: "凭证只从运行控制台的环境变量读取，控制台不保存也不显示密钥值。" }),

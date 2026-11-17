@@ -22,11 +22,14 @@ from .config import REPO_ROOT, Settings
 from .db import Database
 from .diagnosis import diagnose
 from .ingest import Ingestor
+from .progress import scan_job
 from .runner import NAME, Runner
 
+ACTIVE_RUNS = {"planning", "running", "summarizing", "archiving"}
 MATRIX_KEYS = {"name", "cluster", "dataset_root", "benchmarks", "models", "harnesses",
                "concurrency", "attempts", "selection", "image_map"}
-OVERRIDE_KEYS = {"cluster", "concurrency", "attempts", "n_tasks", "tasks", "exclude_gpu"}
+OVERRIDE_KEYS = {"cluster", "concurrency", "attempts", "n_tasks", "tasks", "exclude_gpu",
+                 "benchmarks", "models", "harnesses"}
 EVIDENCE_LIMIT = 32 * 1024 * 1024
 PRIVATE_FIELDS = {"env", "extra_env", "headers", "extra_headers", "extra_body", "auth", "credentials", "token", "cookie", "cookies"}
 SECRET_FIELD = re.compile(r"(?:api[_-]?key|access[_-]?key(?:[_-]?(?:id|secret))?|password|passwd|secret|authorization|access[_-]?token|refresh[_-]?token|private[_-]?key)$", re.I)
@@ -153,6 +156,16 @@ def apply_overrides(text: str, overrides: dict) -> tuple[str, str | None]:
     for key in ("n_tasks", "tasks", "exclude_gpu"):
         if overrides.get(key) not in (None, ""):
             selection[key] = overrides[key]
+    for key in ("benchmarks", "models", "harnesses"):
+        items = overrides.get(key)
+        if items in (None, ""):
+            continue
+        if isinstance(items, str):
+            items = [item.strip() for item in items.split(",") if item.strip()]
+        if (not isinstance(items, list) or not items
+                or not all(isinstance(item, str) and item.strip() for item in items)):
+            raise HTTPException(422, f"{key} 必须是非空的 profile 名称列表")
+        value[key] = [item.strip() for item in items]
     if "n_tasks" in overrides and overrides.get("n_tasks") in ("", None):
         selection.pop("n_tasks", None)
     if "tasks" in overrides:
@@ -310,7 +323,22 @@ def create_app(settings: Settings, console: Console | None = None,
         path = REPO_ROOT / "configs" / "matrices" / f"{name}.yaml"
         if not path.is_file():
             raise HTTPException(404, "矩阵不存在")
-        return {"name": name, "yaml": path.read_text(encoding="utf-8")}
+        text = path.read_text(encoding="utf-8")
+        fields = {}
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError:
+            value = None
+        if isinstance(value, dict):
+            for key in ("benchmarks", "models", "harnesses"):
+                items = value.get(key)
+                if isinstance(items, list):
+                    fields[key] = [item for item in items if isinstance(item, str)]
+            selection = value.get("selection") if isinstance(value.get("selection"), dict) else {}
+            fields["selection"] = {key: selection[key] for key in
+                                   ("n_tasks", "tasks", "exclude_gpu") if key in selection}
+            fields["cluster"] = value.get("cluster")
+        return {"name": name, "yaml": text, "fields": fields}
 
     @app.post("/api/runs/preview")
     def preview_run(request: MatrixRequest):
@@ -333,14 +361,32 @@ def create_app(settings: Settings, console: Console | None = None,
 
     @app.get("/api/runs")
     def list_runs(limit: int = 100):
-        return {"runs": state.database.list_runs(max(1, min(limit, 500)))}
+        runs = state.database.list_runs(max(1, min(limit, 500)))
+        for run in runs:
+            if run["status"] in ACTIVE_RUNS:
+                run["progress"] = _run_progress(run)
+        return {"runs": runs}
+
+    def _run_progress(run: dict):
+        if not run or not run.get("job_dir"):
+            return None
+        return scan_job(Path(run["job_dir"]), run.get("planned_trials"),
+                        run.get("started_at"), run.get("status") in ACTIVE_RUNS)
 
     @app.get("/api/runs/{name}")
     def get_run(name: str):
         run = state.database.get_run(name)
         if run is None:
             raise HTTPException(404, "运行不存在")
+        run["progress"] = _run_progress(run)
         return run
+
+    @app.get("/api/runs/{name}/progress")
+    def run_progress(name: str):
+        run = state.database.get_run(name)
+        if run is None:
+            raise HTTPException(404, "运行不存在")
+        return {"name": name, "status": run["status"], "progress": _run_progress(run)}
 
     @app.post("/api/runs/{name}/cancel")
     def cancel_run(name: str):
@@ -397,6 +443,9 @@ def create_app(settings: Settings, console: Console | None = None,
         job["agents"] = sorted({c["agent"] for c in job["combos"]})
         job["models"] = sorted({c["model"] for c in job["combos"]})
         job["datasets"] = sorted({c["dataset"] for c in job["combos"]})
+        job["run"] = state.database.has_run(name)
+        if job["status"] == "running":
+            job["progress"] = scan_job(Path(job["path"]), job.get("planned_trials"), None, True)
         return job
 
     @app.get("/api/jobs/{name}/trials")

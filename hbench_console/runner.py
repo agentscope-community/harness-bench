@@ -14,13 +14,14 @@ import subprocess
 import threading
 import time
 
+from .cleanup import GRACE_SECONDS, cleanup_job, kill_group, stop_process_group
 from .config import Settings
 from .db import Database, now
 from .ingest import Ingestor
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 ACTIVE = ("planning", "running", "summarizing", "archiving")
-CANCEL_GRACE_SEC = 120
+CANCEL_GRACE_SEC = GRACE_SECONDS
 
 
 class RunnerError(ValueError):
@@ -49,7 +50,11 @@ class Runner:
 
     def stop(self):
         self._stop.set()
-        self._terminate()
+        with self._process_lock:
+            process = self._process
+        stop_process_group(process)
+        if self._active:
+            self._cleanup_resources(self._active)
         self._queue.put(None)
 
     def status(self):
@@ -137,7 +142,9 @@ class Runner:
             code = self._spawn([*self.settings.hbench_cmd, "matrix", "--config", str(matrix_path),
                                 "--output", str(plan_path), "--name", name], log)
             if self._cancel_requested(name):
+                self._cleanup_resources(name, log)
                 self.database.update_run(name, status="cancelled", finished_at=now())
+                self._log(log, "cancelled")
                 return
             if code != 0:
                 return self._finish_failed(run, "计划渲染失败，见日志")
@@ -156,6 +163,7 @@ class Runner:
             code = self._spawn(command, log)
             cancelled = self._cancel_requested(name)
             if cancelled:
+                self._cleanup_resources(name, log)
                 self.database.update_run(name, status="cancelled", exit_code=code, finished_at=now())
                 self._log(log, "cancelled")
                 return
@@ -172,7 +180,9 @@ class Runner:
         code = self._spawn([*self.settings.hbench_cmd, "summary",
                             str(self.settings.jobs_root / name), "--output", str(report_dir)], log)
         if self._cancel_requested(name):
+            self._cleanup_resources(name, log)
             self.database.update_run(name, status="cancelled", finished_at=now())
+            self._log(log, "cancelled")
             return
         if code != 0:
             return self._finish_failed(self.database.get_run(name), "结果汇总失败，见日志")
@@ -181,6 +191,11 @@ class Runner:
             self._log(log, "archiving to OSS (best effort)")
             code = self._spawn([*self.settings.hbench_cmd, "archive",
                                 str(self.settings.jobs_root / name), "--report", str(report_dir)], log)
+            if self._cancel_requested(name):
+                self._cleanup_resources(name, log)
+                self.database.update_run(name, status="cancelled", exit_code=code, finished_at=now())
+                self._log(log, "cancelled")
+                return
             if code != 0:
                 # Archiving never changes the evaluation outcome.
                 self._log(log, "archive failed; local evidence is intact")
@@ -194,6 +209,20 @@ class Runner:
     def _cancel_requested(self, name: str) -> bool:
         run = self.database.get_run(name)
         return bool(run and run["cancel_requested"])
+
+    def _cleanup_resources(self, name: str, log=None) -> dict:
+        """Reclaim containers, networks and volumes of a cancelled job."""
+        job_dir = self.settings.jobs_root / name
+        try:
+            summary = cleanup_job(job_dir, log or (lambda message: None))
+        except Exception as error:  # cleanup must never mask cancellation
+            summary = {"errors": [f"{type(error).__name__}: {error}"]}
+        if log is not None:
+            self._log(log, "cleanup: {} trials, {} containers, {} networks, {} volumes{}".format(
+                summary.get("projects", 0), summary.get("containers", 0),
+                summary.get("networks", 0), summary.get("volumes", 0),
+                f", {len(summary['errors'])} errors" if summary.get("errors") else ""))
+        return summary
 
     def _finish_failed(self, run, message: str):
         name = run["name"]
@@ -216,26 +245,30 @@ class Runner:
             self._process = process
         self.database.update_run(self._active, pid=process.pid)
         terminated_at = None
+        cancelled = False
+        killed = False
         while True:
             code = process.poll()
             if code is not None:
                 break
             if terminated_at is None and self._active and self._cancel_requested(self._active):
                 terminated_at = time.monotonic()
+                cancelled = True
                 try:
                     os.killpg(os.getpgid(process.pid), signal.SIGTERM)
                 except OSError:
                     process.terminate()
-            elif terminated_at is not None and time.monotonic() - terminated_at > CANCEL_GRACE_SEC:
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except OSError:
-                    process.kill()
+            elif (not killed and terminated_at is not None
+                  and time.monotonic() - terminated_at > CANCEL_GRACE_SEC):
+                killed = True
+                kill_group(process)
             time.sleep(0.5)
         with self._process_lock:
             self._process = None
         self.database.update_run(self._active, pid=None)
         self._log(log, f"[exit {code}]")
+        if cancelled:
+            kill_group(process)  # children that outlived the leader
         return code
 
     @staticmethod

@@ -107,8 +107,8 @@ queued → planning → running → summarizing → archiving → succeeded
 - running：`hbench run --config ...`；dry-run 到此直接成功。
 - summarizing：`hbench summary` 生成 summary.json/report.html。
 - archiving：仅当配置了 `HB_OSS_*` 才执行；失败只写日志，不改变状态。
-- 取消：向进程组发 SIGTERM，让 Harbor 清理容器，状态置 cancelled。
-- 控制台重启：未完成的运行标记 failed 并提示用 `harbor jobs resume` 续跑；不自动续跑。
+- 取消：向进程组发 SIGTERM，5 秒内未退出则 SIGKILL；随后按 job 目录里的 trial 名清理对应 compose project 的容器、网络与卷（`hbench_console/cleanup.py`）。状态置 cancelled，已完成的 trial 结果保留，未完成的部分不保证完整。
+- 控制台重启：未完成的运行标记 failed 并提示用 `harbor jobs resume` 续跑；停机时同样终止进程组并清理容器资源；不自动续跑。
 - 日志：`artifacts/console/logs/<run>.log`，子进程 stdout/stderr 实时写入。
 
 ## 8. 展示

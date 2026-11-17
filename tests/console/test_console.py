@@ -2,6 +2,8 @@
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -10,6 +12,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
+from hbench_console import cleanup
 from hbench_console.api import create_app
 from hbench_console.config import REPO_ROOT, Settings
 from hbench_console.demo import build
@@ -699,6 +702,28 @@ class RunTests(ConsoleFixture):
                 runner.stop()
         self.assertEqual(run["status"], "cancelled")
 
+    def test_running_cancel_cleans_job_resources(self):
+        database = Database(self.settings.database)
+        database.initialize()
+        runner = Runner(self.settings, database, Ingestor(self.settings, database))
+        summary = {"projects": 1, "containers": 2, "networks": 1, "volumes": 0, "errors": []}
+        with mock.patch.dict(os.environ, {"FAKE_RUN_DELAY": "30"}), \
+                mock.patch("hbench_console.runner.cleanup_job", return_value=summary) as cleanup_job:
+            runner.start()
+            try:
+                runner.submit("run-cleanup", "name: x\n", dry_run=True)
+                wait_for(lambda: database.get_run("run-cleanup")["status"] == "running", timeout=15)
+                runner.cancel("run-cleanup")
+                run = wait_for(lambda: (database.get_run("run-cleanup")
+                                        if database.get_run("run-cleanup")["status"] == "cancelled" else None))
+            finally:
+                runner.stop()
+        self.assertEqual(run["status"], "cancelled")
+        cleanup_job.assert_called()
+        self.assertEqual(cleanup_job.call_args[0][0], self.settings.jobs_root / "run-cleanup")
+        self.assertIn("cleanup: 1 trials, 2 containers, 1 networks, 0 volumes",
+                      Path(run["log_path"]).read_text())
+
     def test_interrupted_runs_are_marked_on_start(self):
         database = Database(self.settings.database)
         database.initialize()
@@ -710,6 +735,69 @@ class RunTests(ConsoleFixture):
         run = database.get_run("run-old")
         self.assertEqual(run["status"], "failed")
         self.assertIn("harbor jobs resume", run["error"])
+
+
+class CleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="cleanup-test-"))
+        self.job = self.tmp / "job"
+        (self.job / "task-a__abc").mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_project_names_ignore_non_trial_entries(self):
+        (self.job / "Task B__x y").mkdir()
+        (self.job / ".sources").mkdir()
+        (self.job / "config.json").write_text("{}")
+        self.assertEqual(cleanup.project_names(self.job), ["task-a__abc", "task-b__x-y"])
+
+    def test_cleanup_removes_containers_networks_and_volumes(self):
+        calls = []
+
+        def fake(args):
+            calls.append(args)
+            if args[0] == "ps":
+                return subprocess.CompletedProcess(args, 0, "c1\nc2\n", "")
+            if args[:2] == ["network", "ls"]:
+                return subprocess.CompletedProcess(args, 0, "n1\n", "")
+            if args[:2] == ["volume", "ls"]:
+                return subprocess.CompletedProcess(args, 0, "v1\n", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with mock.patch.object(cleanup, "_engine", side_effect=fake):
+            summary = cleanup.cleanup_job(self.job)
+        self.assertEqual((summary["projects"], summary["containers"],
+                          summary["networks"], summary["volumes"]), (1, 2, 1, 1))
+        self.assertIn(["container", "rm", "-f", "c1", "c2"], calls)
+        self.assertIn(["network", "rm", "n1"], calls)
+        self.assertIn(["volume", "rm", "-f", "v1"], calls)
+        self.assertIn("label=com.docker.compose.project=task-a__abc", calls[0])
+
+    def test_failed_removal_is_reported_and_cleanup_continues(self):
+        def fake(args):
+            if args[0] == "ps":
+                return subprocess.CompletedProcess(args, 0, "c1\n", "")
+            if args[:2] == ["network", "ls"]:
+                return subprocess.CompletedProcess(args, 0, "n1\n", "")
+            if args[:2] == ["volume", "ls"]:
+                return subprocess.CompletedProcess(args, 0, "v1\n", "")
+            if args[:2] == ["container", "rm"]:
+                return subprocess.CompletedProcess(args, 1, "", "container in use")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with mock.patch.object(cleanup, "_engine", side_effect=fake):
+            summary = cleanup.cleanup_job(self.job)
+        self.assertEqual(summary["containers"], 0)
+        self.assertEqual(summary["networks"], 1)
+        self.assertEqual(summary["volumes"], 1)
+        self.assertTrue(any("container in use" in error for error in summary["errors"]))
+
+    def test_missing_job_directory_skips_the_engine(self):
+        with mock.patch.object(cleanup, "_engine", side_effect=AssertionError("no call")):
+            summary = cleanup.cleanup_job(self.tmp / "absent")
+        self.assertEqual(summary["projects"], 0)
+        self.assertEqual(summary["errors"], [])
 
 
 class ApiTests(ConsoleFixture):
@@ -724,6 +812,61 @@ class ApiTests(ConsoleFixture):
         self.assertIn("cluster: docker", response.json()["matrix"])
         bad = client.post("/api/runs/preview", json={"matrix": "name: m\n", "overrides": {"bogus": 1}})
         self.assertEqual(bad.status_code, 422)
+
+    def test_preview_overrides_dataset_harness_and_model_lists(self):
+        import yaml
+        client, _ = self.client()
+        response = client.post("/api/runs/preview", json={
+            "matrix": "name: m\nbenchmarks: [terminal-bench]\nmodels: [bailian-model-a]\n"
+                      "harnesses: [codex]\ncluster: docker\n",
+            "overrides": {"benchmarks": ["terminal-bench", "swe-bench-verified"],
+                          "models": ["bailian-model-b"], "harnesses": ["pi", "agentscope-java"]}})
+        self.assertEqual(response.status_code, 200)
+        value = yaml.safe_load(response.json()["matrix"])
+        self.assertEqual(value["benchmarks"], ["terminal-bench", "swe-bench-verified"])
+        self.assertEqual(value["models"], ["bailian-model-b"])
+        self.assertEqual(value["harnesses"], ["pi", "agentscope-java"])
+        for bad in ([], [""], [1]):
+            with self.subTest(bad=bad):
+                response = client.post("/api/runs/preview", json={
+                    "matrix": "name: m\nbenchmarks: [terminal-bench]\n"
+                              "models: [bailian-model-a]\nharnesses: [codex]\n",
+                    "overrides": {"benchmarks": bad}})
+                self.assertEqual(response.status_code, 422)
+
+    def test_matrix_exposes_structured_fields_for_the_form(self):
+        client, _ = self.client()
+        value = client.get("/api/matrices/bailian-18").json()
+        self.assertEqual(value["fields"]["cluster"], "docker")
+        self.assertIn("tau3-bench", value["fields"]["benchmarks"])
+        self.assertIn("agentscope-java", value["fields"]["harnesses"])
+        self.assertIn("selection", value["fields"])
+        self.assertEqual(client.get("/api/matrices/../../etc").status_code, 404)
+
+    def test_run_progress_counts_completed_and_active_trials(self):
+        client, app = self.client()
+        database = app.state.console.database
+        database.create_run("run-progress", "name: x\n", False)
+        job_dir = self.settings.jobs_root / "run-progress"
+        job_dir.mkdir(parents=True)
+        for index in range(5):
+            trial = job_dir / f"task-{index}__abc"
+            trial.mkdir()
+            if index < 3:
+                (trial / "result.json").write_text("{}")
+        database.update_run("run-progress", status="running", planned_trials=10,
+                            job_dir=str(job_dir), started_at="2026-11-17T00:00:00+00:00")
+        progress = client.get("/api/runs/run-progress/progress").json()["progress"]
+        self.assertEqual(progress["planned"], 10)
+        self.assertEqual(progress["recorded"], 3)
+        self.assertEqual(progress["running"], 2)
+        self.assertEqual(progress["queued"], 5)
+        self.assertEqual(progress["percent"], 30.0)
+        self.assertEqual(len(progress["active"]), 2)
+        run = client.get("/api/runs/run-progress").json()
+        self.assertEqual(run["progress"]["recorded"], 3)
+        listed = client.get("/api/runs").json()["runs"][0]
+        self.assertEqual(listed["progress"]["running"], 2)
 
     def test_duplicate_run_name_rejected(self):
         client, app = self.client()
