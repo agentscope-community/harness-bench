@@ -6,9 +6,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
+from urllib.parse import unquote
 
 from fastapi.testclient import TestClient
 
@@ -18,7 +20,7 @@ from hbench_console.config import REPO_ROOT, Settings
 from hbench_console.demo import build
 from hbench_console.db import Database, SCHEMA
 from hbench_console.diagnosis import diagnose
-from hbench_console.ingest import Ingestor, _evidence_links
+from hbench_console.ingest import Ingestor, _evidence_links, _missing_trials
 from hbench_console.runner import Runner, RunnerError
 from hbench.summary import aggregate
 
@@ -42,7 +44,7 @@ elif command == "run":
     print("fake run completed")
 elif command == "summary":
     out = Path(args[args.index("--output") + 1])
-    out.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=False)
     (out / "summary.json").write_text(json.dumps({
         "recorded_trials": 0, "planned_trials": 4, "missing_trials": 4,
         "pass_rate_planned": 0.0, "groups": [], "trials": [], "note": "fake"}))
@@ -151,6 +153,23 @@ class DiagnosisTests(unittest.TestCase):
 
 
 class IngestTests(ConsoleFixture):
+    def test_missing_trials_match_unique_registry_namespaces(self):
+        cases = [
+            (["tau3-bench__tau3-airline-0"], "sierra-research/tau3-bench__tau3-airline-0", []),
+            (["task", "task"], "sierra-research/task", [("task", 1)]),
+            (["task", "suite/task"], "suite/task", [("task", 1)]),
+            (["task", "suite/task"], "registry/suite/task", [("suite/task", 1), ("task", 1)]),
+            (["task"], "registry/other-task", [("task", 1)]),
+        ]
+        for planned, recorded, expected in cases:
+            with self.subTest(planned=planned, recorded=recorded), \
+                    mock.patch("hbench_console.ingest._planned_trials", return_value=[
+                        ("tau3-bench", task, "pi", "model") for task in planned]):
+                summary = {"trials": [{"dataset": "tau3-bench", "task": recorded,
+                                       "agent": "pi", "model": "model"}]}
+                missing = _missing_trials(self.tmp, summary)
+                self.assertEqual([(row["task"], row["missing"]) for row in missing], expected)
+
     def test_legacy_database_migration_is_additive_and_idempotent(self):
         database = Database(self.tmp / "legacy.sqlite")
         legacy = SCHEMA
@@ -732,6 +751,122 @@ class MultiStepEvidenceTests(ConsoleFixture):
 
 
 class RunTests(ConsoleFixture):
+    def test_final_summary_refreshes_existing_background_report(self):
+        settings = self.make_settings(allow_real_runs=True, real_hbench=True)
+        name = self.demo_job(settings)
+        database = Database(settings.database)
+        database.initialize()
+        database.create_run(name, "name: x\n", False)
+        ingestor = Ingestor(settings, database)
+        self.assertEqual(ingestor.sync()[0]["status"], "indexed")
+        job = settings.jobs_root / name
+        report = settings.reports_root / name
+        previous = json.loads((report / "summary.json").read_text())
+        # New evidence must be reflected by the final report, even with an
+        # existing report whose timestamp appears newer (e.g. clock skew).
+        next(job.glob("*/result.json")).unlink()
+        future = time.time() + 3600
+        os.utime(report / "summary.json", (future, future))
+        runner = Runner(settings, database, ingestor)
+        runner._active = name
+        with (self.tmp / "final.log").open("w") as log, \
+                mock.patch.dict(os.environ, {"HB_OSS_BUCKET": ""}):
+            runner._after_run(name, log, report)
+        self.assertEqual(database.get_run(name)["status"], "succeeded")
+        final = json.loads((report / "summary.json").read_text())
+        self.assertEqual(final["recorded_trials"], previous["recorded_trials"] - 1)
+        self.assertTrue((report / "report.html").is_file())
+        for trial in final["trials"]:
+            self.assertTrue((report / unquote(trial["evidence"])).is_file())
+        self.assertEqual(database.get_job(name)["recorded_trials"], final["recorded_trials"])
+        self.assertEqual(list(settings.reports_root.iterdir()), [report])
+
+    def test_final_summary_waits_for_background_refresh(self):
+        settings = self.make_settings(allow_real_runs=True, real_hbench=True)
+        name = self.demo_job(settings)
+        database = Database(settings.database)
+        database.initialize()
+        database.create_run(name, "name: x\n", False)
+        ingestor = Ingestor(settings, database)
+        runner = Runner(settings, database, ingestor)
+        runner._active = name
+        background_entered = threading.Event()
+        release_background = threading.Event()
+        final_entered = threading.Event()
+        run_command = subprocess.run
+        spawn = runner._spawn
+        results = []
+
+        def blocked_summary(command, **kwargs):
+            background_entered.set()
+            if not release_background.wait(10):
+                raise TimeoutError("background test refresh was not released")
+            return run_command(command, **kwargs)
+
+        def final_summary(command, log):
+            final_entered.set()
+            return spawn(command, log)
+
+        with (self.tmp / "concurrent.log").open("w") as log, \
+                mock.patch.dict(os.environ, {"HB_OSS_BUCKET": ""}), \
+                mock.patch("hbench_console.ingest.subprocess.run", side_effect=blocked_summary), \
+                mock.patch.object(runner, "_spawn", side_effect=final_summary):
+            background = threading.Thread(target=lambda: results.extend(ingestor.sync()), daemon=True)
+            final = threading.Thread(target=runner._after_run,
+                                     args=(name, log, settings.reports_root / name), daemon=True)
+            background.start()
+            try:
+                self.assertTrue(background_entered.wait(5))
+                final.start()
+                wait_for(lambda: database.get_run(name)["status"] == "summarizing", timeout=5)
+                self.assertFalse(final_entered.wait(0.2))
+            finally:
+                release_background.set()
+                background.join(15)
+                if final.ident is not None:
+                    final.join(15)
+            self.assertFalse(background.is_alive())
+            self.assertFalse(final.is_alive())
+        self.assertTrue(final_entered.is_set())
+        self.assertEqual(results[0]["status"], "indexed")
+        self.assertEqual(database.get_run(name)["status"], "succeeded")
+        self.assertEqual(list(settings.reports_root.iterdir()), [settings.reports_root / name])
+
+    def test_failed_or_cancelled_final_summary_preserves_previous_report(self):
+        database = Database(self.settings.database)
+        database.initialize()
+        ingestor = Ingestor(self.settings, database)
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                name = "run-summary-" + str(cancelled).lower()
+                database.create_run(name, "name: x\n", False)
+                report = self.settings.reports_root / name
+                report.mkdir(parents=True)
+                (report / "summary.json").write_text('{"note": "previous report"}')
+                runner = Runner(self.settings, database, ingestor)
+
+                def fail_summary(command, log):
+                    target = Path(command[command.index("--output") + 1])
+                    target.mkdir()
+                    (target / "partial.json").write_text("{}")
+                    if cancelled:
+                        database.update_run(name, cancel_requested=1)
+                    return 2
+
+                with (self.tmp / f"{name}.log").open("w") as log, \
+                        mock.patch.object(runner, "_spawn", side_effect=fail_summary), \
+                        mock.patch.object(runner, "_cleanup_resources") as cleanup:
+                    runner._after_run(name, log, report)
+                run = database.get_run(name)
+                self.assertEqual(run["status"], "cancelled" if cancelled else "failed")
+                if cancelled:
+                    cleanup.assert_called_once_with(name, mock.ANY)
+                else:
+                    self.assertEqual(run["error"], "结果汇总失败，见日志")
+                    cleanup.assert_not_called()
+                self.assertEqual((report / "summary.json").read_text(), '{"note": "previous report"}')
+                self.assertEqual(list(self.settings.reports_root.glob(".*")), [])
+
     def test_real_run_is_refused_without_flag(self):
         runner = Runner(self.settings, Database(self.settings.database), None)
         Database(self.settings.database).initialize()

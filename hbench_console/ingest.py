@@ -126,11 +126,15 @@ def _missing_trials(job_dir: Path, summary: dict) -> list[dict]:
     for trial in summary.get("trials", []):
         key = (trial.get("dataset") or "adhoc", trial.get("task"),
                trial.get("agent"), trial.get("model"))
-        # Harbor can record task_name as "<dataset>/<task>" while the lock
-        # keeps the dataset and task name in separate fields. Prefer exact IDs.
+        # Harbor may prefix the task with a dataset or registry namespace
+        # (e.g. sierra-research/). Prefer exact IDs, then a unique planned suffix.
         dataset, task, agent, model = key
-        if key not in remaining and isinstance(task, str) and task.startswith(dataset + "/"):
-            key = (dataset, task[len(dataset) + 1:], agent, model)
+        if key not in remaining and isinstance(task, str):
+            matches = [candidate for candidate in remaining
+                       if (candidate[0], candidate[2], candidate[3]) == (dataset, agent, model)
+                       and task.endswith("/" + candidate[1])]
+            if len(matches) == 1:
+                key = matches[0]
         if key in remaining:
             remaining[key] -= 1
     return [{"dataset": dataset, "task": task, "agent": agent, "model": model,
@@ -248,7 +252,7 @@ class Ingestor:
     def __init__(self, settings: Settings, database: Database):
         self.settings = settings
         self.database = database
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.last_sync: str | None = None
         self.last_error: str | None = None
 
@@ -288,16 +292,13 @@ class Ingestor:
 
     def _ingest(self, job_dir: Path) -> dict:
         name = job_dir.name
-        report = self.settings.reports_root / name
         try:
             # A running job has config.json (and usually lock.json) but no result.json yet.
             # Index it with zero recorded trials so the console shows it before completion.
             if ((job_dir / "config.json").is_file() and not (job_dir / "result.json").is_file()
                     and not any(job_dir.glob("*/result.json"))):
                 return self._ingest_running(job_dir)
-            if self._needs_refresh(job_dir, report):
-                self._summarize(job_dir, report)
-            summary = json.loads((report / "summary.json").read_text(encoding="utf-8"))
+            summary = self.refresh_report(job_dir)
             self._store(name, job_dir, summary)
             return {"name": name, "status": "indexed",
                     "recorded_trials": summary.get("recorded_trials")}
@@ -347,20 +348,41 @@ class Ingestor:
             return True
         return _job_evidence_mtime(job_dir) > _timestamp(summary_path)
 
-    def _summarize(self, job_dir: Path, report: Path):
-        self.settings.tmp_dir.mkdir(parents=True, exist_ok=True)
-        target = self.settings.tmp_dir / f"{job_dir.name}-{uuid.uuid4().hex[:8]}"
+    def refresh_report(self, job_dir: Path, *, force: bool = False,
+                       execute: Callable[[list[str]], int] | None = None) -> dict:
+        """Serialize report generation, replacement and reading with background sync.
+
+        Runner supplies its cancellable, logged executor and forces a final
+        snapshot even when an incremental report already exists.
+        """
+        with self._lock:
+            report = self.settings.reports_root / job_dir.name
+            if force or self._needs_refresh(job_dir, report):
+                self._summarize(job_dir, report, execute=execute)
+            return json.loads((report / "summary.json").read_text(encoding="utf-8"))
+
+    def _summarize(self, job_dir: Path, report: Path, *,
+                   execute: Callable[[list[str]], int] | None = None):
+        report.parent.mkdir(parents=True, exist_ok=True)
+        # A sibling keeps evidence links valid after rename and stays on the
+        # report filesystem even when console data lives on a different mount.
+        target = report.parent / f".{job_dir.name}-{uuid.uuid4().hex}"
         env = dict(os.environ)
         env["PYTHONPATH"] = str(self.settings.repo_root) + os.pathsep + env.get("PYTHONPATH", "")
         try:
-            completed = subprocess.run(
-                [*self.settings.hbench_cmd, "summary", str(job_dir),
-                 "--output", str(target)],
-                cwd=self.settings.repo_root, env=env, capture_output=True, text=True, timeout=900)
-            if completed.returncode != 0:
-                detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-                raise RuntimeError(detail[-1] if detail else "hbench summary failed")
-            report.parent.mkdir(parents=True, exist_ok=True)
+            command = [*self.settings.hbench_cmd, "summary", str(job_dir),
+                       "--output", str(target)]
+            if execute is None:
+                completed = subprocess.run(
+                    command, cwd=self.settings.repo_root, env=env,
+                    capture_output=True, text=True, timeout=900)
+                if completed.returncode != 0:
+                    detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+                    raise RuntimeError(detail[-1] if detail else "hbench summary failed")
+            else:
+                code = execute(command)
+                if code != 0:
+                    raise RuntimeError(f"hbench summary exited with code {code}")
             if report.exists():
                 shutil.rmtree(report)
             target.rename(report)

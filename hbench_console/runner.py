@@ -200,14 +200,26 @@ class Runner:
 
     def _after_run(self, name: str, log, report_dir: Path):
         self.database.update_run(name, status="summarizing")
-        code = self._spawn([*self.settings.hbench_cmd, "summary",
-                            str(self.settings.jobs_root / name), "--output", str(report_dir)], log)
+        error = None
+
+        def execute(command):
+            # Cancellation may have been requested while waiting for sync's lock.
+            if self._cancel_requested(name):
+                return 1
+            return self._spawn(command, log)
+
+        try:
+            self.ingestor.refresh_report(self.settings.jobs_root / name,
+                                         force=True, execute=execute)
+        except Exception as exc:
+            error = exc
+            self._log(log, f"summary failed: {type(exc).__name__}: {exc}")
         if self._cancel_requested(name):
             self._cleanup_resources(name, log)
             self.database.update_run(name, status="cancelled", finished_at=now())
             self._log(log, "cancelled")
             return
-        if code != 0:
+        if error is not None:
             return self._finish_failed(self.database.get_run(name), "结果汇总失败，见日志")
         if os.environ.get("HB_OSS_BUCKET", "").strip():
             self.database.update_run(name, status="archiving")
