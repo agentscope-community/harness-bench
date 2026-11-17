@@ -1,8 +1,0 @@
-name: ${HB_CLAUDE_MODEL_ID}
-base_url: ${HB_CLAUDE_BASE_URL}
-api_key_name: HB_CLAUDE_API_KEY
-skip_model_parsing: true
-api_formats:
-  claude-code: anthropic_messages
-  hermes: anthropic_messages
-  openclaw: anthropic_messages

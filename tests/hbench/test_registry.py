@@ -21,7 +21,7 @@ class RegistryTests(unittest.TestCase):
                 self.assertEqual(cls.name(), name)
 
     def test_new_native_logs_are_discoverable(self):
-        for file in ("claude-code.txt", "hermes-session.jsonl", "openclaw.session.jsonl"):
+        for file in ("hermes-session.jsonl", "openclaw.session.jsonl"):
             self.assertIn(file, harness_evidence_files())
 
     def test_duplicate_identity_is_rejected(self):
