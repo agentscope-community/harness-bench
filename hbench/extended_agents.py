@@ -28,7 +28,7 @@ class FrozenNative:
             raise RuntimeError(f"Runtime version mismatch for {self.name()}")
         probe = await _probe(environment, self.get_version_command())
         if probe.return_code:
-            raise RuntimeError(f"Cannot execute baked {self.name()}: {probe.stderr}")
+            raise RuntimeError(f"Cannot execute baked {self.name()}: {probe.stderr or probe.stdout}")
         (self.logs_dir / "version.json").write_text(json.dumps({
             "agent": self.name(), "expected_version": expected,
             "actual_version_output": probe.stdout, "runtime_version": versions[self.name()],
