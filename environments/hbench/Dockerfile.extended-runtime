@@ -12,7 +12,10 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/hbench-runtime/extensions/python
 RUN mkdir -p /opt/hbench-runtime/extensions/bin \
     && uv python install 3.12 \
     && uv venv --python 3.12 /opt/hbench-runtime/extensions/hermes \
+    && mkdir -p /opt/hbench-runtime/extensions/hermes-src \
+    && curl -fL --retry 3 https://github.com/NousResearch/hermes-agent/archive/f97608f178d1ffeca59860195ab7da295f7c8e5f.tar.gz \
+       | tar -xz --strip-components=1 -C /opt/hbench-runtime/extensions/hermes-src \
     && uv pip install --python /opt/hbench-runtime/extensions/hermes/bin/python \
-       'https://github.com/NousResearch/hermes-agent/archive/f97608f178d1ffeca59860195ab7da295f7c8e5f.tar.gz' \
+       --editable /opt/hbench-runtime/extensions/hermes-src \
     && ln -s /opt/hbench-runtime/extensions/hermes/bin/hermes /opt/hbench-runtime/extensions/bin/hermes
 RUN uv run --with pyyaml python -c 'import json; from pathlib import Path; import yaml; p=Path("/tmp/harness-profiles"); names=("claude-code","hermes","openclaw"); Path("/opt/hbench-runtime/extensions/versions.json").write_text(json.dumps({n:yaml.safe_load((p/(n+".yaml")).read_text())["kwargs"]["version"] for n in names}))'
