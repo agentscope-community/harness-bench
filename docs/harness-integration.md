@@ -18,10 +18,10 @@ relative to each trial's `agent/` directory; nested sessions and the normalized
 `trajectory.json` are also indexed. Declare only public logs, never configuration
 files containing credentials.
 
-## Hermes and OpenClaw runtime
+## Claude Code, Hermes and OpenClaw runtime
 
-The original runtime remains usable for Codex, Pi and AgentScope Java. Hermes
-and OpenClaw require the extended runtime:
+The original runtime remains usable for Codex, Pi and AgentScope Java. Claude
+Code, Hermes and OpenClaw require the extended runtime:
 
 ```sh
 docker build -f environments/hbench/Dockerfile.extended-runtime \

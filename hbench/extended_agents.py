@@ -1,9 +1,13 @@
 """Native Harbor adapters using the prebuilt extended runtime."""
 import json
+import shlex
+from harbor.agents.base import BaseAgent
+from harbor.agents.agent_auth_resolution import ModelConnectionSpec
 from harbor.agents.installed.claude_code import ClaudeCode
 
 from harbor.agents.installed.hermes import Hermes
 from harbor.agents.installed.openclaw import OpenClaw
+from harbor.models.model_api_format import ModelApiFormat
 
 from hbench.agents import _probe, record_request
 from hbench.registry import harness_registry
@@ -41,14 +45,51 @@ class FrozenClaudeCode(FrozenNative, ClaudeCode):
 
 
 class FrozenHermes(FrozenNative, Hermes):
-    pass
+    def get_version_command(self):
+        return "hermes --version"
 
 
 class FrozenOpenClaw(FrozenNative, OpenClaw):
+    API_MODES = {
+        ModelApiFormat.OPENAI_CHAT_COMPLETIONS: "openai-completions",
+        ModelApiFormat.OPENAI_RESPONSES: "openai-responses",
+        ModelApiFormat.ANTHROPIC_MESSAGES: "anthropic-messages",
+    }
+    MODEL_CONNECTION = ModelConnectionSpec(
+        supported_api_formats=list(API_MODES),
+        api_key_destination_names={"default": "HB_OPENCLAW_API_KEY"},
+        base_url_destination_names={"default": None},
+    )
+
+    @classmethod
+    def resolve_model_connection_config(cls, model_name, resolve_env, **kwargs):
+        # Harbor's native OpenClaw adapter only accepts provider-specific config.
+        # Translate the shared benchmark connection into an isolated provider.
+        return BaseAgent.resolve_model_connection_config.__func__(
+            cls, model_name, resolve_env, **kwargs
+        )
+
+    def _merge_model_connection(self, cfg):
+        access = self.model_connection
+        model_id = self._parse_model_name(self.model_name)[1]
+        cfg.setdefault("models", {}).setdefault("providers", {})["hbench"] = {
+            "baseUrl": access.execution_base_url,
+            "apiKey": "${HB_OPENCLAW_API_KEY}",
+            "api": self.API_MODES[access.model_api_format],
+            "models": [{"id": model_id, "name": model_id}],
+        }
+
     def get_version_command(self):
         return "openclaw --version"
 
     async def exec_as_agent(self, environment, command, **kwargs):
         # The frozen payload already has Node 24; upstream's installer uses nvm.
         command = command.replace(". ~/.nvm/nvm.sh && nvm use 24 && ", "")
+        if "openclaw agent --local --json " in command:
+            provider, model_id = self._parse_model_name(self.model_name)
+            selected = model_id if self.skip_model_parsing or not provider else f"{provider}/{model_id}"
+            command = command.replace(
+                f"--model {shlex.quote(selected)} ",
+                f"--model {shlex.quote('hbench/' + model_id)} ", 1,
+            )
         return await super().exec_as_agent(environment, command, **kwargs)
