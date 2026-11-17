@@ -25,6 +25,7 @@ from .ingest import Ingestor
 from .progress import scan_job
 from .runner import NAME, Runner
 from .statistics import job_statistics, job_status
+from hbench.registry import harness_registry
 
 ACTIVE_RUNS = {"planning", "running", "summarizing", "archiving"}
 MATRIX_KEYS = {"name", "cluster", "dataset_root", "benchmarks", "models", "harnesses",
@@ -242,7 +243,7 @@ def catalog(settings: Settings) -> dict:
                        "configured": bool(variable and os.environ.get(variable))})
     return {
         "benchmarks": [p.stem for p in sorted((configs / "benchmarks").glob("*.yaml"))],
-        "harnesses": [p.stem for p in sorted((configs / "harnesses").glob("*.yaml"))],
+        "harnesses": list(harness_registry()),
         "models": models,
         "clusters": [p.stem for p in sorted((configs / "clusters").glob("*.yaml"))],
         "matrices": [p.stem for p in sorted((configs / "matrices").glob("*.yaml"))],

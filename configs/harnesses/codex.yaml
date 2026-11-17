@@ -1,4 +1,5 @@
 name: codex
+evidence_files: [codex.txt]
 import_path: hbench.agents:FrozenCodex
 supported_api_formats: [openai_responses]
 kwargs:

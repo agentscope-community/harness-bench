@@ -312,13 +312,13 @@ class DockerTests(DockerFixture, unittest.TestCase):
         with self.assertRaises(ValueError):
             self.make_env(EnvironmentConfig(docker_image="task", gpus=1, gpu_types=[" "]))._check_host_gpu_types()
 
-    def test_kubernetes_shared_outputs_are_bit_for_bit_unchanged(self):
+    def test_kubernetes_shared_outputs_with_optional_extended_runtime(self):
         values = [runtime_overrides(image, main_image="task:1", startup_env={"PATH": "/custom:/bin", "SECRET": "offline"},
                                     main_keepalive=idle) for image in (None, "runtime:1") for idle in (False, True)]
         values += [add_setup_gate({"name": "main", "args": ["serve"]}, 30, agent_user=user, agent_home=home)
                    for user, home in ((None, None), ("agent", None), (1000, "/home/custom"))]
         self.assertEqual(hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest(),
-                         "d3f7dc2556d86fb7e4136e52086a0fda755451ef9696e0b447a1e45e3f0a9f56")
+                         "62c1cd399a45a8bfa66ea73886097895ab353208e3ccab2f6de45803d878aed4")
 
     def test_init_copy_script_offline_alias_contents_and_idempotence(self):
         script = self.make_env()._prepare_runtime_overlay()["services"]["hbench-runtime-init"]["command"][0]

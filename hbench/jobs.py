@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 import yaml
+from hbench.registry import harness_registry
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -71,6 +72,10 @@ def _check_env(env):
 def load_profile(kind, name):
     path = Path(name).expanduser()
     if not path.is_file():
+        if kind == "harnesses":
+            registry = harness_registry()
+            if str(name) in registry:
+                return deepcopy(registry[str(name)])
         path = ROOT / "configs" / kind / (str(name) + ".yaml")
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):

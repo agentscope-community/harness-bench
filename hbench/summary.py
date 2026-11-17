@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 from urllib.parse import quote
+from hbench.registry import harness_name
 
 
 def _count(value, label):
@@ -236,11 +237,10 @@ def aggregate(rows, planned=None, *, expected=None):
 def _agent_key(config):
     # These adapter names are inherited/declared by the installed classes, not
     # inferred from Python class names (FrozenCodex, for example, is 'codex').
-    names = {"hbench.agents:FrozenCodex": "codex", "hbench.agents:FrozenPi": "pi",
-             "hbench.agents:AgentScopeJava": "agentscope-java"}
     identity = config.import_path or config.name
-    if config.name is None and identity in names:
-        name = names[identity]
+    registered = harness_name(identity)
+    if config.name is None and registered:
+        name = registered
     else:
         from harbor.agents.factory import AgentFactory
         name = AgentFactory.get_agent_class_from_config(config).name()

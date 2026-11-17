@@ -1,5 +1,6 @@
 """Scan Harbor job directories, summarize them with hbench and index the result."""
 from collections import Counter
+from collections.abc import Callable
 from datetime import datetime, timezone
 from itertools import islice
 import json
@@ -11,6 +12,7 @@ import threading
 import uuid
 
 from hbench.summary import DIAGNOSTICS_VERSION, aggregate
+from hbench.registry import harness_name, harness_evidence_files
 
 from .config import Settings
 from .db import Database, now
@@ -41,13 +43,9 @@ def _job_evidence_mtime(job_dir: Path) -> float:
     return newest if newest > 0 else _timestamp(job_dir)
 
 
-HARNESS_NAMES = {"hbench.agents:FrozenCodex": "codex", "hbench.agents:FrozenPi": "pi",
-                 "hbench.agents:AgentScopeJava": "agentscope-java"}
-
-
 def _agent_identity(agent: dict) -> tuple[str, str]:
     identity = agent.get("import_path") or agent.get("name") or ""
-    name = HARNESS_NAMES.get(identity) or identity.rsplit(":", 1)[-1].lower()
+    name = harness_name(identity) or identity.rsplit(":", 1)[-1].lower()
     return name, agent.get("model_name") or "unknown"
 
 

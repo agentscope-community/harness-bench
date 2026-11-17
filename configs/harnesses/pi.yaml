@@ -1,4 +1,5 @@
 name: pi
+evidence_files: [pi.txt]
 import_path: hbench.agents:FrozenPi
 supported_api_formats: [openai_chat_completions, openai_responses, anthropic_messages]
 kwargs:

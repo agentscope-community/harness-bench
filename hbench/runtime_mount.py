@@ -66,6 +66,12 @@ cp -a /usr/local/bin/node /payload/bin/node
 cp -a /usr/local/bin/uv /usr/local/bin/uvx /payload/bin/
 cp -a /usr/local/lib/node_modules /payload/node_modules
 cp -a /opt/pi-mcp-adapter /payload/pi-mcp-adapter
+if [ -d /opt/hbench-runtime/extensions ]; then
+    cp -a /opt/hbench-runtime/extensions /payload/extensions
+    ln -s /opt/hbench-runtime/extensions/bin/hermes /payload/bin/hermes
+    ln -s /opt/hbench-runtime/node_modules/@anthropic-ai/claude-code/cli.js /payload/bin/claude
+    ln -s /opt/hbench-runtime/node_modules/openclaw/openclaw.mjs /payload/bin/openclaw
+fi
 ln -s /opt/hbench-runtime/node_modules/npm/bin/npm-cli.js /payload/bin/npm
 ln -s /opt/hbench-runtime/node_modules/npm/bin/npx-cli.js /payload/bin/npx
 ln -s /opt/hbench-runtime/node_modules/@openai/codex/bin/codex.js /payload/bin/codex
