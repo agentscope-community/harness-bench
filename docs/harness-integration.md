@@ -49,7 +49,7 @@ python -m hbench run --config artifacts/plans/native-harness-check.yaml
 
 Each trial gets its own container and state. Hermes uses `/tmp/hermes` with
 memory disabled by the Harbor adapter; OpenClaw creates a local agent session
-inside the task container. Do not bind a personal agent home into trial
+inside the task container with memory embeddings disabled. Do not bind a personal agent home into trial
 containers. The dataset verifier determines rewards independently of the
 Harness process exit code.
 
@@ -57,3 +57,17 @@ Claude Code uses `anthropic-compatible.yaml`: set `HB_ANTHROPIC_BASE_URL` and
 `HB_ANTHROPIC_MODEL_ID`, and provide the credential referenced by `api_key_name`.
 An Anthropic Messages compatible endpoint can serve a non-Anthropic model;
 validate tool use as well as simple text responses before comparing scores.
+
+```sh
+export HB_ANTHROPIC_BASE_URL=https://your-endpoint.example/apps/anthropic
+export HB_ANTHROPIC_MODEL_ID=your-model-id
+python -m hbench plan --benchmark terminal-bench --harness claude-code \
+  --model anthropic-compatible --cluster docker --dataset-root artifacts/datasets \
+  --tasks freight-dispatch-shift,coq-block-bound --concurrency 2 \
+  --name claude-code-check --output artifacts/plans/claude-code-check.yaml
+python -m hbench run --config artifacts/plans/claude-code-check.yaml
+```
+
+Run separate plans when the Harnesses require different model profiles. A
+multi-Harness, multi-model plan creates every combination, so each model must
+declare an API format supported by every selected Harness.

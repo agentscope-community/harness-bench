@@ -24,6 +24,7 @@ class RegistryTests(unittest.TestCase):
                         model_api_format=api_format, skip_model_parsing=True,
                     )
                     cfg = agent._build_full_openclaw_config()
+                    self.assertFalse(cfg["agents"]["defaults"]["memorySearch"]["enabled"])
                     provider = cfg["models"]["providers"]["hbench"]
                     self.assertEqual(provider["api"], native)
                     self.assertEqual(provider["baseUrl"], "https://example.test/api")
