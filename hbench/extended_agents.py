@@ -48,6 +48,38 @@ class FrozenHermes(FrozenNative, Hermes):
     def get_version_command(self):
         return "hermes --version"
 
+    def _convert_hermes_session_to_atif(self, jsonl_text, session_id):
+        trajectory = super()._convert_hermes_session_to_atif(jsonl_text, session_id)
+        if trajectory is None:
+            return None
+        records = []
+        for line in jsonl_text.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and "messages" in record and "input_tokens" in record:
+                records.append(record)
+        if records:
+            # Hermes exports usage on the session, not on individual messages.
+            # Its input_tokens excludes cache reads/writes; ATIF includes them.
+            metrics = trajectory.final_metrics
+            metrics.total_prompt_tokens = sum(
+                (r.get("input_tokens") or 0) + (r.get("cache_read_tokens") or 0)
+                + (r.get("cache_write_tokens") or 0) for r in records
+            )
+            metrics.total_completion_tokens = sum(r.get("output_tokens") or 0 for r in records)
+            metrics.total_cached_tokens = sum(r.get("cache_read_tokens") or 0 for r in records)
+            trajectory.session_id = records[0].get("id") or session_id
+        return trajectory
+
+    def populate_context_post_run(self, context):
+        super().populate_context_post_run(context)
+        path = self.logs_dir / "trajectory.json"
+        if path.is_file():
+            metrics = json.loads(path.read_text()).get("final_metrics") or {}
+            context.n_cache_tokens = metrics.get("total_cached_tokens")
+
 
 class FrozenOpenClaw(FrozenNative, OpenClaw):
     # Benchmark containers have no personal memory or embedding service.

@@ -10,6 +10,24 @@ from hbench_console.ingest import _agent_identity
 
 
 class RegistryTests(unittest.TestCase):
+    def test_hermes_session_usage_includes_cached_input(self):
+        from hbench.extended_agents import FrozenHermes
+        from harbor.models.agent.context import AgentContext
+
+        with tempfile.TemporaryDirectory() as directory:
+            logs = Path(directory)
+            agent = FrozenHermes(logs_dir=logs)
+            (logs / "hermes-session.jsonl").write_text(json.dumps({
+                "id": "native-session", "input_tokens": 20, "cache_read_tokens": 80,
+                "cache_write_tokens": 10, "output_tokens": 7,
+                "messages": [{"role": "user", "content": "hello"},
+                             {"role": "assistant", "content": "done"}],
+            }) + "\n")
+            context = AgentContext()
+            agent.populate_context_post_run(context)
+            self.assertEqual((context.n_input_tokens, context.n_output_tokens, context.n_cache_tokens), (110, 7, 80))
+            self.assertEqual(json.loads((logs / "trajectory.json").read_text())["session_id"], "native-session")
+
     def test_openclaw_result_survives_trailing_native_shutdown_logs(self):
         from hbench.extended_agents import FrozenOpenClaw
 
