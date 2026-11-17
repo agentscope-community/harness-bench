@@ -487,7 +487,7 @@ class IngestTests(ConsoleFixture):
                    "exception_info": {"exception_type": error} if error else None}
             rows.append(row)
             (folder / "result.json").write_text(json.dumps(row))
-            trials.append({"trial": folder.name, "task": f"task-{i}", "agent": "pi",
+            trials.append({"trial": folder.name, "task": f"terminal-bench/task-{i}", "agent": "pi",
                            "model": "model", "dataset": "terminal-bench", "reward": reward, "error": error})
         summary = aggregate(rows, expected={("pi", "model", "terminal-bench"): 20})
         summary["trials"] = trials

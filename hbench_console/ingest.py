@@ -128,6 +128,11 @@ def _missing_trials(job_dir: Path, summary: dict) -> list[dict]:
     for trial in summary.get("trials", []):
         key = (trial.get("dataset") or "adhoc", trial.get("task"),
                trial.get("agent"), trial.get("model"))
+        # Harbor can record task_name as "<dataset>/<task>" while the lock
+        # keeps the dataset and task name in separate fields. Prefer exact IDs.
+        dataset, task, agent, model = key
+        if key not in remaining and isinstance(task, str) and task.startswith(dataset + "/"):
+            key = (dataset, task[len(dataset) + 1:], agent, model)
         if key in remaining:
             remaining[key] -= 1
     return [{"dataset": dataset, "task": task, "agent": agent, "model": model,
