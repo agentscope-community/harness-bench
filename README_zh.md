@@ -65,13 +65,18 @@ flowchart LR
 `hbench_console` 在 hbench 之上提供运行管理和结果看板，不重写 Harbor 的调度与证据链：
 
 ```bash
-python -m hbench_console --port 8090            # 看板默认只读已有结果
-CONSOLE_ALLOW_REAL_RUNS=1 python -m hbench_console   # 同时允许发起付费运行
+python -m hbench_console                              # 看板默认只读，监听 0.0.0.0:8090
+set -a; . ./.env; set +a                              # 真实运行需要 HB_* 密钥与模型 ID
+CONSOLE_ALLOW_REAL_RUNS=1 python -m hbench_console    # 同时允许发起付费运行
 ```
 
 控制台扫描 `artifacts/jobs/`（可指向 OSS 同步下来的镜像目录），调用 `hbench summary` 建索引，
 按 harness × model × dataset 展示通过率和逐题明细。真实运行默认关闭；凭证只从控制台进程的
-环境变量读取，不落库。设计与接口见 [评测控制台执行文档](docs/console-plan.md)。
+环境变量读取，不落库。
+
+![结果看板](docs/images/console-jobs.png)
+
+界面截图与常用操作见 [评测控制台使用说明](docs/console-guide.md)，设计细节见 [评测控制台执行文档](docs/console-plan.md)。
 
 诊断单独展示 Harbor 异常、原生停止原因、工具失败事实及日志/轨迹链接，不改变 reward 或通过率。缺失 token 和工具统计显示为未知，不当作 0；部分 token 汇总标注缺失 trial 数。配置声明与适配器原生绑定分别展示，均不等于服务端已确认参数一致。原始证据留在本机，Console 链接返回脱敏文本副本（单文件预览上限 32 MiB）。SDK 无法区分字段缺失与零值时，按未知展示。
 

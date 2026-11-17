@@ -65,14 +65,18 @@ Keep credentials in the controller host’s `.env` file and out of configuration
 `hbench_console` adds run management and result dashboards on top of hbench without reimplementing Harbor’s scheduling or evidence chain:
 
 ```bash
-python -m hbench_console --port 8090                  # read-only over existing results
+python -m hbench_console                              # read-only dashboard on 0.0.0.0:8090
+set -a; . ./.env; set +a                              # HB_* keys and model IDs for real runs
 CONSOLE_ALLOW_REAL_RUNS=1 python -m hbench_console    # also allow paid runs
 ```
 
 It indexes `artifacts/jobs/` (or an OSS mirror directory) through `hbench summary` and shows
 pass rates by harness × model × dataset plus per-task and per-trial detail. Real runs are off by
-default; credentials are read from the console process environment and never stored. See the
-[console execution document](docs/console-plan.md).
+default; credentials are read from the console process environment and never stored.
+
+![结果看板](docs/images/console-jobs.png)
+
+See the [console usage guide](docs/console-guide.md) for screenshots and the [console execution document](docs/console-plan.md) for design details.
 
 Diagnostics separately show Harbor exceptions, native stop reasons, tool failures and log/trajectory links without changing rewards or pass rates. Missing token or tool statistics remain unknown, not zero; partial token totals include missing-trial counts. Declared settings and adapter-native bindings are shown separately, neither constituting provider-confirmed parameter parity. Raw evidence stays local; Console links return redacted text copies (32 MiB preview limit per file). When the SDK cannot distinguish an absent usage field from zero, it is shown as unknown.
 
