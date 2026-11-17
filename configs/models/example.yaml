@@ -7,6 +7,8 @@ skip_model_parsing: true
 api_formats:
   codex: openai_responses
   pi: openai_chat_completions
+  hermes: openai_chat_completions
+  openclaw: openai_chat_completions
   agentscope-java: openai_chat_completions
 # Used by tau3's simulated user and natural-language assertions, not the candidate.
 environment_env:

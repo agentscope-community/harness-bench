@@ -8,6 +8,8 @@ skip_model_parsing: true
 api_formats:
   codex: openai_responses
   pi: openai_chat_completions
+  hermes: openai_chat_completions
+  openclaw: openai_chat_completions
   agentscope-java: openai_chat_completions
 # Job-wide settings: every model in one matrix must keep these identical.
 environment_env:

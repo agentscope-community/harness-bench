@@ -3,6 +3,7 @@ ARG BASE_RUNTIME=hbench/harness-runtime:0.1.0
 FROM node:24-bookworm-slim AS node24
 FROM ${BASE_RUNTIME}
 USER root
+RUN rm -rf /usr/local/lib/node_modules/npm
 COPY --from=node24 /usr/local/bin/node /usr/local/bin/node
 COPY --from=node24 /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 COPY configs/harnesses /tmp/harness-profiles
