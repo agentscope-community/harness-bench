@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -9,6 +10,18 @@ from hbench_console.ingest import _agent_identity
 
 
 class RegistryTests(unittest.TestCase):
+    def test_openclaw_result_survives_trailing_native_shutdown_logs(self):
+        from hbench.extended_agents import FrozenOpenClaw
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = FrozenOpenClaw(logs_dir=Path(directory))
+            result = {"payloads": [{"text": "done"}], "meta": {"agentMeta": {"usage": {"input": 12}}}}
+            (Path(directory) / "openclaw.txt").write_text(
+                "[memory] startup log\n" + json.dumps(result, indent=2)
+                + "\n[state/agent-db] agent database clean-close receipt: written\n"
+            )
+            self.assertEqual(agent._parse_stdout(), result)
+
     def test_openclaw_translates_model_connection_without_serializing_credentials(self):
         from hbench.extended_agents import FrozenOpenClaw
 

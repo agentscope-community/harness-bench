@@ -84,6 +84,62 @@ class FrozenOpenClaw(FrozenNative, OpenClaw):
     def get_version_command(self):
         return "openclaw --version"
 
+    def _parse_stdout(self):
+        path = self.logs_dir / "openclaw.txt"
+        if not path.is_file():
+            return None
+        text = path.read_text()
+        decoder = json.JSONDecoder()
+        envelope = None
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            if line.startswith("{"):
+                try:
+                    value, _ = decoder.raw_decode(text[offset:])
+                    if isinstance(value, dict) and isinstance(value.get("meta"), dict):
+                        envelope = value
+                except ValueError:
+                    pass
+            offset += len(line)
+        return envelope
+
+    async def run(self, instruction, environment, context):
+        try:
+            await super().run(instruction, environment, context)
+        finally:
+            try:
+                await self._copy_openclaw_session_file_to_agent_logs(
+                    environment, dict(self.model_connection.env)
+                )
+            except Exception:
+                self.logger.exception("Could not export the OpenClaw session")
+
+    async def _copy_openclaw_session_file_to_agent_logs(self, environment, env):
+        await super()._copy_openclaw_session_file_to_agent_logs(environment, env)
+        transcript = self.logs_dir / "openclaw.session.jsonl"
+        if transcript.is_file() and transcript.stat().st_size:
+            return
+        # Current OpenClaw stores transcripts in SQLite. Its native export
+        # handles compression, active branches and redaction for us.
+        agent_id = self.options.openclaw_agent_id
+        export = (
+            "mkdir -p /tmp/hbench-export && openclaw sessions export-trajectory "
+            f"--agent {shlex.quote(agent_id)} "
+            f"--session-key {shlex.quote('agent:' + agent_id + ':main')} "
+            "--workspace /tmp/hbench-export --output trial --json"
+        )
+        convert = (
+            "import json; from pathlib import Path; "
+            "p=Path('/tmp/hbench-export/.openclaw/trajectory-exports/trial/session-branch.json'); "
+            "d=json.loads(p.read_text()); "
+            "Path('/logs/agent/openclaw.session.jsonl').write_text("
+            "''.join(json.dumps(e)+'\\n' for e in d['entries']))"
+        )
+        await self.exec_as_agent(
+            environment, command=export + " && python3 -c " + shlex.quote(convert),
+            env=env, timeout_sec=60,
+        )
+
     async def exec_as_agent(self, environment, command, **kwargs):
         # The frozen payload already has Node 24; upstream's installer uses nvm.
         command = command.replace(". ~/.nvm/nvm.sh && nvm use 24 && ", "")
