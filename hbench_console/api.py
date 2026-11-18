@@ -240,10 +240,13 @@ def catalog(settings: Settings) -> dict:
             profile = {}
         variable = profile.get("api_key_name")
         models.append({"profile": path.stem, "api_key_name": variable,
+                       "api_formats": profile.get("api_formats", {}),
                        "configured": bool(variable and os.environ.get(variable))})
     return {
         "benchmarks": [p.stem for p in sorted((configs / "benchmarks").glob("*.yaml"))],
         "harnesses": list(harness_registry()),
+        "harness_api_formats": {name: profile["supported_api_formats"]
+                                for name, profile in harness_registry().items()},
         "models": models,
         "clusters": [p.stem for p in sorted((configs / "clusters").glob("*.yaml"))],
         "matrices": [p.stem for p in sorted((configs / "matrices").glob("*.yaml"))],

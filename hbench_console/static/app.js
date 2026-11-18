@@ -680,14 +680,14 @@ async function renderNewRun() {
   try { matrixInfo = await api("/api/matrices/bailian-18"); } catch { /* keep fallback */ }
   const fields = matrixInfo.fields || {};
   const options = {
-    benchmarks: (fields.benchmarks || catalogData.benchmarks || []).slice(),
-    harnesses: (fields.harnesses || catalogData.harnesses || []).slice(),
-    models: (fields.models || (catalogData.models || []).map(m => m.profile)).slice(),
+    benchmarks: [...new Set([...(catalogData.benchmarks || []), ...(fields.benchmarks || [])])],
+    harnesses: [...new Set([...(catalogData.harnesses || []), ...(fields.harnesses || [])])],
+    models: [...new Set([...(catalogData.models || []).map(m => m.profile), ...(fields.models || [])])],
   };
   const selected = {
-    benchmarks: new Set(options.benchmarks),
-    harnesses: new Set(options.harnesses),
-    models: new Set(options.models),
+    benchmarks: new Set(fields.benchmarks || options.benchmarks),
+    harnesses: new Set(fields.harnesses || options.harnesses),
+    models: new Set(fields.models || options.models),
   };
 
   const matrix = h("textarea", { spellcheck: "false", text: matrixInfo.yaml });
@@ -752,6 +752,19 @@ async function renderNewRun() {
     const body = overrides();
     if (!body) {
       preview.replaceChildren(errorBox(new Error("至少选择一个数据集、harness 和模型")));
+      return;
+    }
+    const incompatible = [];
+    for (const model of selected.models) {
+      const profile = (catalogData.models || []).find(m => m.profile === model);
+      for (const harness of selected.harnesses) {
+        const format = profile?.api_formats?.[harness];
+        const supported = catalogData.harness_api_formats?.[harness];
+        if (supported && !supported.includes(format)) incompatible.push(`${harness} × ${model}`);
+      }
+    }
+    if (incompatible.length) {
+      preview.replaceChildren(errorBox(new Error(`模型协议不兼容：${incompatible.join("、")}。矩阵会执行所有组合；Claude Code 请搭配 anthropic-compatible，或拆成独立矩阵。`)));
       return;
     }
     preview.textContent = "渲染中…";

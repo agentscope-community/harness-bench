@@ -3,6 +3,9 @@ import json
 import unittest
 from unittest.mock import patch
 from pathlib import Path
+import asyncio
+import yaml
+from unittest.mock import AsyncMock
 
 from hbench.registry import harness_registry, harness_name, harness_evidence_files
 from hbench.jobs import load_profile
@@ -10,6 +13,34 @@ from hbench_console.ingest import _agent_identity
 
 
 class RegistryTests(unittest.TestCase):
+    def test_native_budget_mapping_and_no_temperature_override(self):
+        from hbench.extended_agents import FrozenHermes, FrozenOpenClaw, FrozenClaudeCode
+        from harbor.agents.installed.base import BaseInstalledAgent
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict("os.environ", {"TEST_KEY": "test"}):
+            common = dict(logs_dir=Path(directory), model_name="custom-model", skip_model_parsing=True,
+                          base_url="https://example.test/v1", model_api_key_name="TEST_KEY",
+                          max_tokens=8192, context_window_tokens=65536)
+            for fmt, key in (("openai_chat_completions", "max_tokens"), ("openai_responses", "max_output_tokens"), ("anthropic_messages", "max_tokens")):
+                hermes = FrozenHermes(**common, model_api_format=fmt)
+                cfg = yaml.safe_load(hermes._build_config_yaml("custom-model", connection=hermes.model_connection))
+                self.assertEqual(cfg["model"]["context_length"], 65536)
+                self.assertEqual(cfg["custom_providers"][0]["extra_body"], {key: 8192})
+                self.assertEqual(cfg["agent"], {"max_turns": None, "reasoning_effort": "none"})
+                self.assertNotIn("temperature", str(cfg))
+            claw = FrozenOpenClaw(**common, model_api_format="openai_chat_completions", reasoning_effort="off")
+            cfg = claw._build_full_openclaw_config()
+            self.assertEqual(cfg["models"]["providers"]["hbench"]["models"][0]["maxTokens"], 8192)
+            self.assertEqual(cfg["agents"]["defaults"]["contextTokens"], 65536)
+            claude = FrozenClaudeCode(**common, model_api_format="anthropic_messages", max_thinking_tokens=0)
+            with patch.object(BaseInstalledAgent, "exec_as_agent", new_callable=AsyncMock) as execute:
+                asyncio.run(claude.exec_as_agent(object(), "claude --print", env={"KEEP": "value"}))
+                env = execute.call_args.kwargs["env"]
+                self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "8192")
+                self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "65536")
+                self.assertEqual(env["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"], "1")
+                self.assertEqual(env["KEEP"], "value")
+
     def test_openclaw_native_events_keep_messages_after_large_system_events(self):
         from hbench.extended_agents import _openclaw_export_to_session
         from harbor.agents.installed.openclaw import openclaw_session_jsonl_to_atif_steps

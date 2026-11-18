@@ -2,18 +2,38 @@
 import json
 import inspect
 import shlex
+import yaml
+from pydantic import BaseModel, Field
+from typing import Literal
 from harbor.agents.base import BaseAgent
 from harbor.agents.agent_auth_resolution import ModelConnectionSpec
-from harbor.agents.installed.claude_code import ClaudeCode
+from harbor.agents.installed.claude_code import ClaudeCode, ClaudeCodeOptions
 
-from harbor.agents.installed.hermes import Hermes
-from harbor.agents.installed.openclaw import OpenClaw
+from harbor.agents.installed.hermes import Hermes, HermesOptions
+from harbor.agents.installed.openclaw import OpenClaw, OpenClawOptions
 from harbor.models.model_api_format import ModelApiFormat
 
 from hbench.agents import _probe, record_request
 from hbench.registry import harness_registry
 
 EXTENSIONS = "/opt/hbench-runtime/extensions"
+
+
+class InferenceBudget(BaseModel):
+    max_tokens: int = Field(default=16384, ge=1)
+    context_window_tokens: int = Field(default=131072, ge=1)
+
+
+class FrozenClaudeCodeOptions(ClaudeCodeOptions, InferenceBudget):
+    pass
+
+
+class FrozenHermesOptions(HermesOptions, InferenceBudget):
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] = "none"
+
+
+class FrozenOpenClawOptions(OpenClawOptions, InferenceBudget):
+    pass
 
 
 def _openclaw_export_to_session(events_text):
@@ -58,14 +78,39 @@ class FrozenNative:
 
     async def run(self, instruction, environment, context):
         record_request(self, self.render_instruction(instruction))
+        (self.logs_dir / "inference-settings.json").write_text(json.dumps({
+            **self.options.model_dump(include={"max_tokens", "context_window_tokens", "reasoning_effort", "max_thinking_tokens"}),
+            "temperature_override": None,
+        }) + "\n")
         await super().run(instruction, environment, context)
 
 
 class FrozenClaudeCode(FrozenNative, ClaudeCode):
-    pass
+    options_model = FrozenClaudeCodeOptions
+
+    async def exec_as_agent(self, environment, command, env=None, **kwargs):
+        env = {**(env or {}),
+               "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.options.max_tokens),
+               "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(self.options.context_window_tokens)}
+        if self.options.max_thinking_tokens == 0:
+            env["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"] = "1"
+        return await super().exec_as_agent(environment, command, env=env, **kwargs)
 
 
 class FrozenHermes(FrozenNative, Hermes):
+    capabilities = Hermes.capabilities.model_copy(update={"reasoning_effort": True})
+    options_model = FrozenHermesOptions
+
+    def _build_config_yaml(self, model, max_turns=None, *, connection=None):
+        config = yaml.safe_load(super()._build_config_yaml(model, max_turns, connection=connection))
+        config["agent"] = {"max_turns": max_turns, "reasoning_effort": self.options.reasoning_effort}
+        config["model"] = {"default": model, "provider": config["provider"],
+                           "context_length": self.options.context_window_tokens}
+        for provider in config.get("custom_providers", []):
+            provider["context_length"] = self.options.context_window_tokens
+            token_field = "max_output_tokens" if provider["api_mode"] == "codex_responses" else "max_tokens"
+            provider["extra_body"] = {token_field: self.options.max_tokens}
+        return yaml.safe_dump(config, sort_keys=False)
     def get_version_command(self):
         return "hermes --version"
 
@@ -103,6 +148,7 @@ class FrozenHermes(FrozenNative, Hermes):
 
 
 class FrozenOpenClaw(FrozenNative, OpenClaw):
+    options_model = FrozenOpenClawOptions
     # Benchmark containers have no personal memory or embedding service.
     _DEFAULT_CONFIG = {"memory": {"search": {"enabled": False}}}
     API_MODES = {
@@ -131,8 +177,11 @@ class FrozenOpenClaw(FrozenNative, OpenClaw):
             "baseUrl": access.execution_base_url,
             "apiKey": "${HB_OPENCLAW_API_KEY}",
             "api": self.API_MODES[access.model_api_format],
-            "models": [{"id": model_id, "name": model_id}],
+            "models": [{"id": model_id, "name": model_id,
+                        "contextWindow": self.options.context_window_tokens,
+                        "maxTokens": self.options.max_tokens}],
         }
+        cfg.setdefault("agents", {}).setdefault("defaults", {})["contextTokens"] = self.options.context_window_tokens
 
     def get_version_command(self):
         return "openclaw --version"

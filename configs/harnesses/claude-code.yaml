@@ -1,6 +1,9 @@
 name: claude-code
 import_path: hbench.extended_agents:FrozenClaudeCode
 supported_api_formats: [anthropic_messages]
-evidence_files: [claude-code.txt]
+evidence_files: [claude-code.txt, inference-settings.json]
 kwargs:
   version: 2.1.325
+  max_tokens: 16384
+  context_window_tokens: 131072
+  max_thinking_tokens: 0

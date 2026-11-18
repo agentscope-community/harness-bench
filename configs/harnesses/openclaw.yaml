@@ -1,6 +1,9 @@
 name: openclaw
 import_path: hbench.extended_agents:FrozenOpenClaw
 supported_api_formats: [openai_chat_completions, openai_responses, anthropic_messages]
-evidence_files: [openclaw.txt, openclaw.session.jsonl, openclaw.events.jsonl]
+evidence_files: [openclaw.txt, openclaw.session.jsonl, openclaw.events.jsonl, inference-settings.json]
 kwargs:
   version: 2026.11.4
+  max_tokens: 16384
+  context_window_tokens: 131072
+  reasoning_effort: "off"

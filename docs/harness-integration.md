@@ -71,3 +71,31 @@ python -m hbench run --config artifacts/plans/claude-code-check.yaml
 Run separate plans when the Harnesses require different model profiles. A
 multi-Harness, multi-model plan creates every combination, so each model must
 declare an API format supported by every selected Harness.
+
+## Console matrices and comparison settings
+
+The console lists every registered Harness and model, independently of the
+default matrix's selections. Select `anthropic-compatible` for Claude Code;
+Hermes and OpenClaw also support the existing Bailian profiles. Preview checks
+every selected model/Harness pair; incompatible cross-products must be split
+into separate matrices.
+
+The three extended profiles explicitly set `context_window_tokens: 131072`
+and `max_tokens: 16384`, matching the conservative AgentScope Java budget and
+the existing Pi output ceiling. These are evaluation budgets, not claims about
+the provider's actual maximum context size. Claude Code uses its documented
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` variables;
+Hermes uses its custom provider context and request body; OpenClaw uses model
+metadata and the agent context budget. Overrides belong in the Harness profile's
+`kwargs`, and each run records `agent/inference-settings.json`.
+
+No temperature override is injected, as with the original profiles. This leaves
+native client/provider behavior intact; it does not guarantee identical numeric
+temperatures. In particular, Claude Code has no shared temperature control in
+this adapter. Reasoning is requested off (`none` for Hermes, `off` for OpenClaw,
+zero thinking budget and adaptive thinking disabled for Claude Code). A custom
+gateway may still enforce its own reasoning policy. Native compaction strategies
+and Codex's existing model-dependent limits remain different; these are not
+identical inference implementations. No new turn-count cap is imposed.
+
+Claude Code environment reference: https://code.claude.com/docs/en/env-vars

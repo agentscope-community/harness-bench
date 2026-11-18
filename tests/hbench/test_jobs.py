@@ -13,6 +13,22 @@ from hbench.summary import aggregate
 
 
 class JobTests(unittest.TestCase):
+    def test_native_matrix_protocols_and_budgets(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"HB_ANTHROPIC_BASE_URL": "https://example.test/anthropic"}):
+            root = Path(temp)
+            profile = self.dataset(root)
+            for names, model in ((["hermes", "openclaw"], "bailian-model-b"),
+                                 (["claude-code", "hermes", "openclaw"], "anthropic-compatible")):
+                job, plan = render_job([profile], [load_profile("harnesses", n) for n in names],
+                                       load_profile("models", model), load_profile("clusters", "docker"), root)
+                self.assertEqual(plan["planned_trials"], len(names) * 2)
+                for agent in job["agents"]:
+                    self.assertEqual(agent["kwargs"]["max_tokens"], 16384)
+                    self.assertEqual(agent["kwargs"]["context_window_tokens"], 131072)
+            with self.assertRaisesRegex(ValueError, "claude-code"):
+                render_job([profile], [load_profile("harnesses", "claude-code")],
+                           load_profile("models", "bailian-model-b"), load_profile("clusters", "docker"), root)
+
     def setUp(self):
         environment = patch.dict(os.environ, {}, clear=True)
         environment.start()
