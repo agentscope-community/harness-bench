@@ -4,23 +4,37 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>hbench 评测控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231677ff'/%3E%3Cpath d='M9 22V10m0 6h14m0-6v12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header class="topbar">
-  <a class="brand" href="#/jobs">hbench 控制台</a>
-  <nav>
-    <a href="#/jobs" data-nav="jobs">结果</a>
-    <a href="#/runs" data-nav="runs">运行</a>
-    <a href="#/runs/new" data-nav="new">新建运行</a>
-    <a href="#/compare" data-nav="compare">对比</a>
-  </nav>
-  <span id="mode" class="mode"></span>
-</header>
-<main id="app" class="page"><p class="muted">加载中…</p></main>
-<footer class="foot">
-  适配评测，非官方榜单；错误、未评分与缺失 trial 均不计为通过。
-</footer>
+<div class="layout">
+  <aside class="sider">
+    <a class="brand" href="#/jobs">
+      <span class="brand-logo">H</span>
+      <span class="brand-text">hbench<small>评测控制台</small></span>
+    </a>
+    <nav class="menu" id="menu">
+      <div class="menu-group">评测</div>
+      <a href="#/jobs" data-nav="jobs" data-icon="results">结果看板</a>
+      <a href="#/compare" data-nav="compare" data-icon="compare">作业对比</a>
+      <div class="menu-group">执行</div>
+      <a href="#/runs" data-nav="runs" data-icon="runs">运行管理</a>
+      <a href="#/runs/new" data-nav="new" data-icon="plus">新建运行</a>
+    </nav>
+    <div class="sider-foot">适配评测，非官方榜单；错误、未评分与缺失 trial 均不计为通过。</div>
+  </aside>
+  <div class="main">
+    <header class="header">
+      <nav class="crumbs" id="crumbs" aria-label="面包屑"></nav>
+      <div class="header-extra">
+        <span id="viewer"></span>
+        <span id="mode" class="mode"></span>
+      </div>
+    </header>
+    <main id="app" class="page"></main>
+  </div>
+</div>
 <script type="module" src="/static/app.js"></script>
 </body>
 </html>
