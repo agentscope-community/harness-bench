@@ -13,7 +13,7 @@ import yaml
 from .jobs import ROOT, load_profile, render_job, validate_execution
 
 MATRIX_FIELDS = frozenset({"name", "cluster", "dataset_root", "benchmarks", "models", "harnesses",
-                           "concurrency", "attempts", "selection", "image_map"})
+                           "concurrency", "attempts", "selection", "image_map", "skip_incompatible"})
 SELECTION_FIELDS = frozenset({"n_tasks", "tasks", "exclude_gpu"})
 
 
@@ -54,6 +54,8 @@ def load_matrix(path, cluster=None):
         raise ValueError("Matrix configuration must be an object")
     if set(value) - MATRIX_FIELDS:
         raise ValueError("Unknown matrix settings: " + ", ".join(sorted(set(value) - MATRIX_FIELDS)))
+    if not isinstance(value.get("skip_incompatible", False), bool):
+        raise ValueError("skip_incompatible must be a boolean")
     selection = value.get("selection") or {}
     if not isinstance(selection, dict) or set(selection) - SELECTION_FIELDS:
         raise ValueError("Matrix selection supports only n_tasks, tasks and exclude_gpu")
@@ -82,6 +84,7 @@ def load_matrix(path, cluster=None):
 
     return {
         "name": name,
+        "skip_incompatible": value.get("skip_incompatible", False),
         "benchmarks": [profile("benchmarks", n) for n in lists["benchmarks"]],
         "harnesses": [profile("harnesses", n) for n in lists["harnesses"]],
         "models": [profile("models", n) for n in lists["models"]],
@@ -122,7 +125,7 @@ def main(argv=None):
     plan = commands.add_parser("plan", help="Render a local Harbor job and comparison contract; no execution")
     plan.add_argument("--benchmark", default="terminal-bench", help="Comma-separated benchmark profiles")
     plan.add_argument("--harness", default="codex,pi,agentscope-java", help="Comma-separated harness profiles")
-    plan.add_argument("--model", default="example", help="Comma-separated model profile names or YAML paths")
+    plan.add_argument("--model", default="bailian-model-a", help="Comma-separated model profile names or YAML paths")
     plan.add_argument("--cluster", default="kubernetes", help="Execution profile: docker, kubernetes, ack, acs, or YAML path")
     plan.add_argument("--dataset-root", type=Path, default=ROOT / "artifacts" / "datasets")
     plan.add_argument("--output", type=Path, required=True, help="New .yaml job path")
@@ -219,7 +222,7 @@ def main(argv=None):
             job, contract = render_job(spec["benchmarks"], spec["harnesses"], spec["models"], spec["cluster"],
                 spec["dataset_root"], job_name=job_name, n_tasks=spec["n_tasks"], task_names=spec["task_names"],
                 exclude_gpu=spec["exclude_gpu"], concurrency=spec["concurrency"], attempts=spec["attempts"],
-                image_map=spec["image_map"])
+                image_map=spec["image_map"], skip_incompatible=spec["skip_incompatible"])
             contract["matrix"] = str(args.config.resolve())
             write_plan(args.output, job, contract)
         elif args.command == "run":

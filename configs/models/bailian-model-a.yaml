@@ -20,3 +20,10 @@ environment_env:
 verifier_env:
   PIP_INDEX_URL: ${HB_PIP_INDEX_URL:-https://pypi.org/simple}
   UV_DEFAULT_INDEX: ${HB_PIP_INDEX_URL:-https://pypi.org/simple}
+
+# Alternative transport for the same model; never substitute another model.
+routes:
+  claude-code:
+    name: ${HB_ANTHROPIC_MODEL_ID:-qwen3.8-max}
+    base_url: ${HB_ANTHROPIC_BASE_URL:-}
+    api_format: anthropic_messages

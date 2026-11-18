@@ -99,3 +99,22 @@ and Codex's existing model-dependent limits remain different; these are not
 identical inference implementations. No new turn-count cap is imposed.
 
 Claude Code environment reference: https://code.claude.com/docs/en/env-vars
+
+## Model selection in the console
+
+The console shows resolved model names rather than transport profile names.
+The legacy `anthropic-compatible` profile remains usable in CLI matrices but is
+hidden in the console. `example` is a test fixture, not a selectable model.
+
+A model profile may declare `routes` keyed by harness name. Each route specifies
+`name`, `base_url`, `api_format`, and optionally `api_key_name`. A route is used
+only when its resolved model name equals the selected model and its URL is set;
+it never substitutes another model. The Qwen profile routes Claude Code through
+`HB_ANTHROPIC_BASE_URL` when `HB_ANTHROPIC_MODEL_ID` matches `HB_MODEL_A_ID`.
+
+Console matrices set `skip_incompatible: true`: unsupported pairs are recorded
+in `skipped_combinations` and excluded from planned trials. A selected harness
+with no usable selected model is an error. CLI matrices retain strict validation
+unless this option is explicitly enabled. Preview and execution share the same
+resolver. Kimi and GLM used as tau3 auxiliary models are not automatically added
+as evaluation candidates; configure candidate model profiles separately.

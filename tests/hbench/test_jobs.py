@@ -29,6 +29,31 @@ class JobTests(unittest.TestCase):
                 render_job([profile], [load_profile("harnesses", "claude-code")],
                            load_profile("models", "bailian-model-b"), load_profile("clusters", "docker"), root)
 
+    def test_auto_routes_preserve_identity_and_count_only_valid_pairs(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
+            "HB_MODEL_A_ID": "qwen3.8-max", "HB_MODEL_B_ID": "deepseek",
+            "HB_ANTHROPIC_MODEL_ID": "qwen3.8-max",
+            "HB_ANTHROPIC_BASE_URL": "https://gateway.test/anthropic",
+        }):
+            root = Path(temp)
+            profile = self.dataset(root)
+            models = [load_profile("models", n) for n in ("bailian-model-a", "bailian-model-b")]
+            harnesses = [load_profile("harnesses", n) for n in ("claude-code", "hermes", "openclaw")]
+            job, plan = render_job([profile], harnesses, models, load_profile("clusters", "docker"), root,
+                                   skip_incompatible=True)
+            self.assertEqual(len(job["agents"]), 5)
+            self.assertEqual(len(plan["combinations"]), 5)
+            self.assertEqual(plan["planned_trials"], 10)
+            self.assertEqual(plan["skipped_combinations"][0]["model"], "deepseek")
+            claude = job["agents"][0]
+            self.assertEqual(claude["model_name"], "qwen3.8-max")
+            self.assertEqual(claude["base_url"], "https://gateway.test/anthropic")
+            self.assertEqual(claude["model_api_format"], "anthropic_messages")
+            models[0]["routes"]["claude-code"]["name"] = "different-model"
+            with self.assertRaisesRegex(ValueError, "claude-code"):
+                render_job([profile], harnesses, models, load_profile("clusters", "docker"), root,
+                           skip_incompatible=True)
+
     def setUp(self):
         environment = patch.dict(os.environ, {}, clear=True)
         environment.start()
@@ -40,7 +65,7 @@ class JobTests(unittest.TestCase):
 
     def render(self, root, profile, *, model=None, harness=None, cluster=None):
         return render_job([profile], [harness or load_profile('harnesses', 'codex')],
-                          model if model is not None else load_profile('models', 'example'),
+                          model if model is not None else load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml'),
                           cluster or load_profile('clusters', 'kubernetes'), root)
 
     def dataset(self, root):
@@ -59,7 +84,7 @@ class JobTests(unittest.TestCase):
             root = Path(temp)
             profile = self.dataset(root)
             job, plan = render_job([profile], [load_profile('harnesses', n) for n in ['codex', 'pi', 'agentscope-java']],
-                load_profile('models', 'example'), load_profile('clusters', 'kubernetes'), root, attempts=2, exclude_gpu=True)
+                load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml'), load_profile('clusters', 'kubernetes'), root, attempts=2, exclude_gpu=True)
             self.assertEqual(plan['planned_trials'], 6)
             self.assertEqual(job['datasets'][0]['task_names'], ['a'])
             self.assertEqual(job['retry']['max_retries'], 0)
@@ -86,7 +111,7 @@ class JobTests(unittest.TestCase):
             root = Path(temp)
             profile = self.dataset(root)
             cluster = load_profile('clusters', 'docker')
-            model = load_profile('models', 'example')
+            model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
             harnesses = [load_profile('harnesses', n) for n in ('codex', 'pi', 'agentscope-java')]
             before = deepcopy((cluster, model, harnesses))
             job, plan = render_job([profile], harnesses, model, cluster, root,
@@ -136,7 +161,7 @@ class JobTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'HB_MODEL_API_KEY': 'secret'}):
             root = Path(temp)
             profile = self.dataset(root)
-            model = load_profile('models', 'example')
+            model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
             model.update(name='actual-model', base_url='https://model.invalid/v1')
             mapping = {'hbench/tau3-main:0.1.0': 'local/tau3-main:1'}
             job, _ = render_job([profile], [load_profile('harnesses', 'codex')], model,
@@ -156,7 +181,7 @@ class JobTests(unittest.TestCase):
             for section in ('environment_env', 'verifier_env'):
                 for value in ('${PRIVATE_KEY}', '${PRIVATE_KEY:-}', ''):
                     with self.subTest(section=section, value=value):
-                        model = load_profile('models', 'example')
+                        model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
                         model[section]['SERVICE_TOKEN'] = value
                         job, plan = self.render(root, profile, model=model)
                         target = job['environment']['env'] if section == 'environment_env' else job['verifier']['env']
@@ -171,18 +196,18 @@ class JobTests(unittest.TestCase):
                 for value in ('literal-credential', '${PRIVATE_KEY:-literal-credential}',
                               'Bearer ${PRIVATE_KEY}', '${PRIVATE_KEY}${OTHER_KEY}', 0, False, None):
                     with self.subTest(section=section, value=value):
-                        model = load_profile('models', 'example')
+                        model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
                         model[section]['SERVICE_TOKEN'] = value
                         with self.assertRaisesRegex(ValueError, 'Sensitive env') as error:
                             self.render(root, profile, model=model)
                         self.assertNotIn('literal-credential', str(error.exception))
-            model = load_profile('models', 'example')
+            model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
             model['environment_env']['SERVICE_TOKEN'] = 'literal-credential'
             model['verifier_env']['SERVICE_TOKEN'] = '${PRIVATE_KEY:-}'
             with self.assertRaisesRegex(ValueError, 'Sensitive env'):
                 self.render(root, profile, model=model)
             for section in ('environment_env', 'verifier_env'):
-                model = load_profile('models', 'example')
+                model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
                 model[section]['OPAQUE'] = '${PRIVATE_KEY:-literal-credential}'
                 with self.subTest(section=section), self.assertRaisesRegex(ValueError, 'Sensitive env'):
                     self.render(root, profile, model=model)
@@ -191,7 +216,7 @@ class JobTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             profile = self.dataset(root)
-            model = load_profile('models', 'example')
+            model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
             model['environment_env'].update(SERVICE_TOKEN='${PRIVATE_KEY}', MODE='${MODE:-normal}')
             model['verifier_env'].update(SERVICE_TOKEN='${VERIFIER_KEY:-}', MODE='test')
             job, _ = self.render(root, profile, model=model)
@@ -209,7 +234,7 @@ class JobTests(unittest.TestCase):
             profile = self.dataset(root)
             for key, value in extras.items():
                 with self.subTest(key=key):
-                    model = load_profile('models', 'example')
+                    model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
                     model[key] = value
                     with patch('hbench.jobs.expand', side_effect=AssertionError('unsafe expansion')):
                         with self.assertRaises(ValueError) as error:
@@ -236,7 +261,7 @@ class JobTests(unittest.TestCase):
             original = self.dataset(root)
             for kind, keys, value in cases:
                 with self.subTest(kind=kind, keys=keys):
-                    profiles = {'model': load_profile('models', 'example'), 'harness': load_profile('harnesses', 'codex'),
+                    profiles = {'model': load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml'), 'harness': load_profile('harnesses', 'codex'),
                                 'cluster': load_profile('clusters', 'kubernetes'), 'benchmark': deepcopy(original)}
                     target = profiles[kind]
                     for key in keys[:-1]:
@@ -253,7 +278,7 @@ class JobTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {'HB_IMAGE_PULL_SECRET': 'pull-secret-name'}):
             root = Path(temp)
             profile = self.dataset(root)
-            model = load_profile('models', 'example')
+            model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
             harness = load_profile('harnesses', 'agentscope-java')
             harness['kwargs']['model_api_key_name'] = 'HB_MODEL_API_KEY'
             cluster = load_profile('clusters', 'ack')
@@ -294,7 +319,7 @@ class JobTests(unittest.TestCase):
     def test_wrong_api_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             profile = self.dataset(Path(temp))
-            model = load_profile('models', 'example')
+            model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
             model['api_formats']['codex'] = 'openai_chat_completions'
             with self.assertRaisesRegex(ValueError, 'does not support'):
                 render_job([profile], [load_profile('harnesses', 'codex')], model,
@@ -306,7 +331,7 @@ class JobTests(unittest.TestCase):
             p = self.dataset(root)
             p['version'] = 'wrong'
             with self.assertRaisesRegex(ValueError, 'identity'):
-                render_job([p], [load_profile('harnesses', 'pi')], load_profile('models', 'example'), load_profile('clusters', 'acs'), root)
+                render_job([p], [load_profile('harnesses', 'pi')], load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml'), load_profile('clusters', 'acs'), root)
 
     def test_expand_defaults(self):
         with patch.dict(os.environ, {}, clear=True):

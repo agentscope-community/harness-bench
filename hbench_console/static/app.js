@@ -874,7 +874,7 @@ async function renderNewRun() {
   preview.replaceChildren(h("div", { class: "inline-empty", text: "尚未预览。预览只渲染计划，不调用模型。" }));
 
   function overrides() {
-    const value = { cluster: "docker" };
+    const value = { cluster: "docker", skip_incompatible: true };
     if (concurrency.value) value.concurrency = Number(concurrency.value);
     if (attempts.value) value.attempts = Number(attempts.value);
     if (nTasks.value) value.n_tasks = Number(nTasks.value);
@@ -893,13 +893,13 @@ async function renderNewRun() {
       for (const harness of selected.harnesses) {
         const format = profile?.api_formats?.[harness];
         const supported = catalogData.harness_api_formats?.[harness];
-        if (supported && !supported.includes(format)) incompatible.push(`${harness} × ${model}`);
+        if (supported && !supported.includes(format)) incompatible.push(`${harness} × ${(catalogData.models || []).find(m => m.profile === model)?.name || model}`);
       }
     }
     return incompatible;
   }
   const incompatibleText = (items) =>
-    `模型协议不兼容：${items.join("、")}。矩阵会执行所有组合；Claude Code 请搭配 anthropic-compatible，或拆成独立矩阵。`;
+    `自动跳过 ${items.length} 个组合：${items.join("、")}。当前未配置可用端点；其余组合正常运行。`;
 
   const counters = {};
   const boxes = {};
@@ -919,10 +919,6 @@ async function renderNewRun() {
       return;
     }
     const incompatible = incompatibleCombos();
-    if (incompatible.length) {
-      preview.replaceChildren(alertBox(incompatibleText(incompatible), "warning", "组合不兼容"));
-      return;
-    }
     preview.replaceChildren(spinner("渲染计划中…"));
     try {
       const data = await api("/api/runs/preview", { method: "POST",
@@ -934,7 +930,9 @@ async function renderNewRun() {
         stat("计划 trial", num(data.planned_trials), "primary"),
         stat("组合", num((data.combinations || []).length)),
         stat("执行后端", data.backend || "docker", "compact"),
-        stat("范围", `${selected.benchmarks.size} 数据集 × ${selected.harnesses.size} harness × ${selected.models.size} 模型`, "compact")));
+        stat("范围", `${selected.benchmarks.size} 数据集，自动匹配可用模型`, "compact")),
+        incompatible.length ? alertBox(incompatibleText(incompatible), "warning") : null,
+        table(["Harness", "模型", "状态"], [...new Map((data.combinations || []).map(c => [c.harness + ":" + c.model, c])).values()].map(c => h("tr", {}, h("td", {text: c.harness}), h("td", {text: c.model}), h("td", {text: "已自动匹配"}))), "没有可运行组合"));
     } catch (error) { if (mine === syncSeq) preview.replaceChildren(errorBox(error)); }
   }
   function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(sync, 300); }
@@ -962,7 +960,7 @@ async function renderNewRun() {
             scheduleSync();
           } });
         boxes[key].push(box);
-        return h("label", { class: "check" }, box, option);
+        return h("label", { class: "check" }, box, key === "models" ? (catalogData.models.find(m => m.profile === option)?.name || option) : option);
       }) : h("div", { class: "inline-empty", style: "padding:8px", text: "无可选项" })));
   };
 
@@ -1049,7 +1047,7 @@ async function renderNewRun() {
         matrix)),
     card({ title: "模型凭证状态", sub: "凭证只从运行控制台的环境变量读取，控制台不保存也不显示密钥值。", flush: true },
       table(["模型 profile", "环境变量", "状态"], catalogData.models.map(m => h("tr", {},
-        h("td", { text: m.profile }), h("td", {}, m.api_key_name ? h("code", { text: m.api_key_name }) : "—"),
+        h("td", { text: m.name || m.profile }), h("td", {}, m.api_key_name ? h("code", { text: m.api_key_name }) : "—"),
         h("td", {}, m.configured ? badge("已设置", "ok") : badge("未设置", "warn")))), "没有模型配置")),
   );
   updateCounts();

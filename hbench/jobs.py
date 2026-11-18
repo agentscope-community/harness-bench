@@ -14,7 +14,7 @@ ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 SECRET_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::-)?\}")
 MODEL_FIELDS = frozenset({"name", "base_url", "api_key_name", "api_formats",
-                          "skip_model_parsing", "environment_env", "verifier_env"})
+                          "skip_model_parsing", "environment_env", "verifier_env", "routes"})
 ENVIRONMENT_IMPORT_PATHS = {
     "kubernetes": "hbench.environment:KubernetesEnvironment",
     "docker": "hbench.docker_environment:FrozenDockerEnvironment",
@@ -126,9 +126,25 @@ def selected_tasks(dataset, n_tasks=None, task_names=None, exclude_gpu=False):
     return names
 
 
+
+def resolve_model_route(settings, harness):
+    """Select an explicitly configured route without changing model identity."""
+    result = deepcopy(settings)
+    routes = result.pop("routes", {})
+    if not isinstance(routes, dict):
+        raise ValueError("Model routes must be a mapping")
+    for name, route in routes.items():
+        if not isinstance(route, dict) or set(route) - {"name", "base_url", "api_key_name", "api_format"}:
+            raise ValueError("Invalid model route")
+    route = routes.get(harness)
+    if route and route.get("name", result["name"]) == result["name"] and route.get("base_url"):
+        result.update({k: v for k, v in route.items() if k in ("base_url", "api_key_name")})
+        result["api_formats"] = {**result.get("api_formats", {}), harness: route.get("api_format")}
+    return result
+
 def render_job(benchmarks, harnesses, model, cluster, dataset_root, *, job_name=None,
                n_tasks=None, task_names=None, exclude_gpu=False, concurrency=1, attempts=1,
-               image_map=None):
+               image_map=None, skip_incompatible=False):
     if concurrency < 1 or attempts < 1:
         raise ValueError("concurrency and attempts must be positive")
     if not benchmarks or not harnesses:
@@ -171,10 +187,15 @@ def render_job(benchmarks, harnesses, model, cluster, dataset_root, *, job_name=
     # Results are grouped by (harness, model name, dataset); names must stay distinct.
     if len(set(model_names)) != len(model_names):
         raise ValueError("Model names in one job must be distinct")
-    for model_settings in all_settings:
+    skipped = []
+    for settings in all_settings:
         for harness in harnesses:
+            model_settings = resolve_model_route(settings, harness["name"])
             api_format = model_settings.get("api_formats", {}).get(harness["name"])
             if api_format not in harness["supported_api_formats"]:
+                if skip_incompatible:
+                    skipped.append({"harness": harness["name"], "model": settings["name"], "reason": "未配置可用的模型端点"})
+                    continue
                 raise ValueError(f"{harness['name']} does not support model API format {api_format!r}")
             agent_configs.append({
                 "import_path": harness["import_path"],
@@ -185,6 +206,9 @@ def render_job(benchmarks, harnesses, model, cluster, dataset_root, *, job_name=
                 "skip_model_parsing": model_settings.get("skip_model_parsing", True),
                 "kwargs": deepcopy(harness.get("kwargs", {})),
             })
+    for harness in harnesses:
+        if not any(a["import_path"] == harness["import_path"] for a in agent_configs):
+            raise ValueError(f"{harness['name']} 没有可运行的已选模型，请调整选择或配置模型端点")
     datasets = []
     sources = []
     for benchmark in benchmarks:
@@ -228,10 +252,12 @@ def render_job(benchmarks, harnesses, model, cluster, dataset_root, *, job_name=
             "model": all_settings[0], "models": all_settings,
             "combinations": [{"dataset": s["name"], "model": m, "harness": h["name"],
                               "planned_trials": len(s["tasks"]) * attempts}
-                             for s in sources for m in model_names for h in harnesses],
+                             for s in sources for m in model_names for h in harnesses
+                             if any(a["model_name"] == m and a["import_path"] == h["import_path"] for a in agent_configs)],
             "cluster": cluster["name"], "backend": backend, "attempts": attempts,
             "concurrency": concurrency,
-            "planned_trials": sum(len(s["tasks"]) for s in sources) * len(harnesses) * len(models) * attempts,
+            "planned_trials": sum(len(s["tasks"]) for s in sources) * len(agent_configs) * attempts,
+            "skipped_combinations": skipped,
             "execution": "not_executed", "note": "Adapted environments; not an official upstream leaderboard score."}
     return job, plan
 

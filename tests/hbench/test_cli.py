@@ -172,7 +172,7 @@ class CliTests(unittest.TestCase):
                 self.assertFalse((self.root / 'not-written.yaml').exists())
 
     def test_secret_model_settings_refused_without_outputs_or_credential_error_leak(self):
-        model = load_profile('models', 'example')
+        model = load_profile('models', Path(__file__).resolve().parents[1] / 'fixtures/model-example.yaml')
         model['metadata'] = {'nested': [{'access_token': 'fake-credential-must-not-leak'}]}
         model_path = self.root / 'model.yaml'
         model_path.write_text(yaml.safe_dump(model))

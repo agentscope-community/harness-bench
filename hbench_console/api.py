@@ -26,12 +26,13 @@ from .progress import scan_job
 from .runner import NAME, Runner
 from .statistics import job_statistics, job_status
 from hbench.registry import harness_registry
+from hbench.jobs import expand, resolve_model_route
 
 ACTIVE_RUNS = {"planning", "running", "summarizing", "archiving"}
 MATRIX_KEYS = {"name", "cluster", "dataset_root", "benchmarks", "models", "harnesses",
-               "concurrency", "attempts", "selection", "image_map"}
+               "concurrency", "attempts", "selection", "image_map", "skip_incompatible"}
 OVERRIDE_KEYS = {"cluster", "concurrency", "attempts", "n_tasks", "tasks", "exclude_gpu",
-                 "benchmarks", "models", "harnesses"}
+                 "benchmarks", "models", "harnesses", "skip_incompatible"}
 EVIDENCE_LIMIT = 32 * 1024 * 1024
 PRIVATE_FIELDS = {"env", "extra_env", "headers", "extra_headers", "extra_body", "auth", "credentials", "token", "cookie", "cookies"}
 SECRET_FIELD = re.compile(r"(?:api[_-]?key|access[_-]?key(?:[_-]?(?:id|secret))?|password|passwd|secret|authorization|access[_-]?token|refresh[_-]?token|private[_-]?key)$", re.I)
@@ -156,7 +157,7 @@ def apply_overrides(text: str, overrides: dict) -> tuple[str, str | None]:
     if not isinstance(value, dict):
         raise HTTPException(422, "矩阵必须是对象")
     selection = dict(value.get("selection") or {})
-    for key in ("cluster", "concurrency", "attempts"):
+    for key in ("cluster", "concurrency", "attempts", "skip_incompatible"):
         if overrides.get(key) not in (None, ""):
             value[key] = overrides[key]
     for key in ("n_tasks", "tasks", "exclude_gpu"):
@@ -225,6 +226,7 @@ class Console:
             shutil.rmtree(work, ignore_errors=True)
         return {"planned_trials": contract.get("planned_trials"),
                 "combinations": contract.get("combinations", []),
+                "skipped_combinations": contract.get("skipped_combinations", []),
                 "backend": contract.get("backend"),
                 "job_name": job_name,
                 "matrix": text}
@@ -238,9 +240,13 @@ def catalog(settings: Settings) -> dict:
             profile = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError:
             profile = {}
+        if path.stem == "anthropic-compatible":
+            continue  # Legacy transport profile remains available to CLI users.
+        resolved = expand(profile)
         variable = profile.get("api_key_name")
         models.append({"profile": path.stem, "api_key_name": variable,
-                       "api_formats": profile.get("api_formats", {}),
+                       "name": resolved.get("name", path.stem),
+                       "api_formats": {n: resolve_model_route(resolved, n).get("api_formats", {}).get(n) for n in harness_registry()},
                        "configured": bool(variable and os.environ.get(variable))})
     return {
         "benchmarks": [p.stem for p in sorted((configs / "benchmarks").glob("*.yaml"))],
