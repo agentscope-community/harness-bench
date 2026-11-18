@@ -31,7 +31,7 @@ class RegistryTests(unittest.TestCase):
             claw = FrozenOpenClaw(**common, model_api_format="openai_chat_completions", reasoning_effort="off")
             cfg = claw._build_full_openclaw_config()
             self.assertEqual(cfg["models"]["providers"]["hbench"]["models"][0]["maxTokens"], 8192)
-            self.assertEqual(cfg["agents"]["defaults"]["contextTokens"], 65536)
+            self.assertEqual(cfg["models"]["providers"]["hbench"]["models"][0]["contextTokens"], 65536)
             claude = FrozenClaudeCode(**common, model_api_format="anthropic_messages", max_thinking_tokens=0)
             with patch.object(BaseInstalledAgent, "exec_as_agent", new_callable=AsyncMock) as execute:
                 asyncio.run(claude.exec_as_agent(object(), "claude --print", env={"KEEP": "value"}))

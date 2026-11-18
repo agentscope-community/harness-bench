@@ -179,9 +179,9 @@ class FrozenOpenClaw(FrozenNative, OpenClaw):
             "api": self.API_MODES[access.model_api_format],
             "models": [{"id": model_id, "name": model_id,
                         "contextWindow": self.options.context_window_tokens,
+                        "contextTokens": self.options.context_window_tokens,
                         "maxTokens": self.options.max_tokens}],
         }
-        cfg.setdefault("agents", {}).setdefault("defaults", {})["contextTokens"] = self.options.context_window_tokens
 
     def get_version_command(self):
         return "openclaw --version"
